@@ -1,0 +1,9 @@
+{
+  "tmin": 1.5,
+  "tmax": 3.0,
+  "interval": 5,
+  "color": "white",
+  "watch": true,
+  "level": "初级",
+  "platform": "tencent"
+}

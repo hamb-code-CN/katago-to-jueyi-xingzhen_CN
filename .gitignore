@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 运行生成 (日志/截图/缓存/看板数据)
+*.log
+analysis_overlay.png
+data.json
+debug/
+
+# KataGo 运行缓存与对局日志 (保留目录结构, 忽略内容)
+katago/**/gtp_logs/*
+!katago/**/gtp_logs/.gitkeep
+katago/**/KataGoData/
+katago/opencl171/KataGoData/
+
+# KataGo 网络权重模型 (~93MB): 不纳入版本库, 请自行下载后放入 katago/ (见 README)
+katago/*.bin.gz

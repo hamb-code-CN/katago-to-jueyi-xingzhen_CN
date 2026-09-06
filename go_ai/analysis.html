@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>KataGo 实时分析</title>
+<style>
+:root{--bg:#14171c;--panel:#1d222a;--panel2:#181d24;--border:#2c333d;--text:#e8eaed;--muted:#8b94a3;--gold:#f0b90b;--black:#39424e;--white:#e8e8e8;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",sans-serif;height:100vh;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:14px;padding:9px 18px;background:var(--panel);border-bottom:1px solid var(--border)}
+.topbar h1{font-size:15px;font-weight:500;letter-spacing:.5px}
+.topbar .tag{font-size:11px;color:#9fe1cb;background:rgba(29,158,117,.15);border:1px solid rgba(29,158,117,.4);padding:2px 8px;border-radius:10px}
+.topbar .st{font-size:12px;color:var(--muted)}
+.topbar .sp{margin-left:auto;font-size:12px;color:var(--muted)}
+.topbar .sp+button{margin-left:12px}
+.main{display:flex;height:calc(100vh - 42px)}
+.board-wrap{flex:1;display:flex;align-items:center;justify-content:center;background:var(--bg);min-width:0;padding:8px}
+.board-wrap img{width:100%;height:100%;object-fit:contain;border-radius:6px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.sidebar{width:280px;background:var(--panel);border-left:1px solid var(--border);overflow-y:auto;padding:12px;flex-shrink:0}
+.card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+.winhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.winhead .side{font-size:12px;color:var(--muted)}
+.winhead .num{font-size:22px;font-weight:500;font-variant-numeric:tabular-nums}
+.bar{flex:1;height:12px;background:#333a44;border-radius:6px;overflow:hidden;display:flex}
+.bar .b{background:#47545f;height:100%}
+.bar .w{background:#e0e0e0;height:100%}
+.winrow{display:flex;align-items:center;gap:10px}
+.winrow .tagb{width:28px;font-size:13px;color:#9fb4c8;font-weight:500}
+.winrow .tagw{width:28px;font-size:13px;color:#d8d8d8;font-weight:500;text-align:right}
+.legend{display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.clist-title{font-size:12px;color:var(--muted);margin:14px 2px 8px;display:flex;justify-content:space-between}
+.cand{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;border:1px solid var(--border);margin-bottom:5px;background:var(--panel2);transition:border-color .2s}
+.cand.best{border-color:var(--gold);background:rgba(240,185,11,.06)}
+.cand .idx{width:16px;text-align:center;font-size:12px;color:var(--muted)}
+.cand.best .idx{color:var(--gold);font-weight:500}
+.cand .pt{width:64px;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;font-variant-numeric:tabular-nums}
+.cand .pt .cn{font-size:14px;font-weight:500;line-height:1.05}
+.cand .pt .gtp{font-size:10px;color:var(--muted);line-height:1.05;margin-top:1px}
+.cand .bar{height:8px;flex:1}
+.cand .pct{width:48px;text-align:right;font-size:12px;font-weight:500;font-variant-numeric:tabular-nums}
+.cand .sub{width:80px;text-align:right;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
+.empty{padding:40px 10px;text-align:center;color:var(--muted);font-size:13px}
+.err{color:#e24b4a}
+
+/* ===== 网页版启动器 (整合面板) ===== */
+#launcher-btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit}
+#launcher-btn:hover{border-color:#5a6472}
+#launcher-btn.on{background:rgba(240,185,11,.12);border-color:rgba(240,185,11,.5);color:var(--gold)}
+#launcher-panel{position:fixed;top:50px;right:12px;width:300px;max-height:calc(100vh - 60px);background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;z-index:100;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5);display:none}
+#launcher-panel.show{display:block}
+.la-sec{margin-bottom:14px}
+.la-sec h3{font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:500;letter-spacing:.5px;text-transform:uppercase}
+.la-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.la-row label{flex:0 0 80px;font-size:12px;color:var(--muted)}
+.la-row input{flex:1;min-width:60px;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit}
+.la-row input:focus{outline:none;border-color:var(--gold)}
+.la-select{flex:1;min-width:120px;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
+.la-select:focus{outline:none;border-color:var(--gold)}
+.la-select option{background:var(--panel2);color:var(--text)}
+.la-btn{padding:6px 10px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .15s}
+.la-btn:hover{border-color:#5a6472;background:#222831}
+.la-btn.primary{background:rgba(240,185,11,.10);border-color:rgba(240,185,11,.4);color:var(--gold)}
+.la-btn.primary:hover{background:rgba(240,185,11,.18)}
+.la-btn.danger{background:rgba(226,75,74,.10);border-color:rgba(226,75,74,.35);color:#f09595}
+.la-btn.danger:hover{background:rgba(226,75,74,.18)}
+.la-btn:disabled{opacity:.4;cursor:not-allowed}
+.la-st{font-size:11px;padding:2px 7px;border-radius:8px;font-weight:500}
+.la-st.run{color:#37d67a;background:rgba(55,214,122,.12);border:1px solid rgba(55,214,122,.3)}
+.la-st.stop{color:var(--muted);background:rgba(139,148,163,.10);border:1px solid rgba(139,148,163,.25)}
+.la-msg{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5;min-height:14px}
+.la-msg.ok{color:#9fe1cb}
+.la-msg.err{color:#f09595}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>KataGo 实时分析</h1>
+  <span class="tag">● 实时计算</span>
+  <span class="st" id="st">等待数据…</span>
+  <span class="sp" id="ts">--:--:--</span>
+  <button id="launcher-btn" onclick="toggleLauncher()">⚙ 启动器</button>
+</div>
+
+<div id="launcher-panel">
+  <div class="la-sec">
+    <h3>运行状态</h3>
+    <div class="la-row">
+      <span style="font-size:12px">AI</span>
+      <span class="la-st" id="la-st-ai">--</span>
+      <span style="font-size:12px;margin-left:8px">KataGo</span>
+      <span class="la-st" id="la-st-katago">--</span>
+    </div>
+    <div class="la-msg" id="la-st-detail">加载中…</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>启动 AI controller</h3>
+    <div class="la-row">
+      <button class="la-btn primary" onclick="startAI('black')">⚫ 执黑启动</button>
+      <button class="la-btn primary" onclick="startAI('white')">⚪ 执白启动</button>
+    </div>
+    <div class="la-msg">等同于 bat 一键启动中的 AI 启动步骤</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>重开一局 (AI 进程不重启)</h3>
+    <div class="la-row">
+      <button class="la-btn" onclick="resetGame('black')">重置为执黑</button>
+      <button class="la-btn" onclick="resetGame('white')">重置为执白</button>
+    </div>
+    <div class="la-msg">玩家决定重开时点击: 实时选择执子颜色, 立即清零对局数据, controller 进程保持运行</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>停止</h3>
+    <div class="la-row">
+      <button class="la-btn danger" onclick="stopService('ai')">停止 AI</button>
+      <button class="la-btn danger" onclick="stopService('katago')">停止 KataGo</button>
+    </div>
+    <div class="la-msg">看板 (本页面) 永远保留, 关闭浏览器即可不再查看</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>KataGo 引擎预加载</h3>
+    <div class="la-row">
+      <button class="la-btn" onclick="preload()">启动 / 重启预加载</button>
+    </div>
+    <div class="la-msg">服务端口 8124, 首次冷启动 60-90s, 之后常驻, AI 启动后免冷启动</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>对手软件 (下次启动生效)</h3>
+    <div class="la-row">
+      <select id="cfg-platform" class="la-select" onchange="savePlatform()">
+        <option value="tencent">腾讯围棋 (原生窗口, 红章 OCR)</option>
+        <option value="xingzhen">星阵围棋 (Edge 浏览器, 头像蓝水滴)</option>
+      </select>
+    </div>
+    <div class="la-msg">选择 AI 要对战的围棋软件。切换后下次启动 AI 时生效</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>智力档位 (下次启动生效)</h3>
+    <div class="la-row">
+      <select id="cfg-level" class="la-select" onchange="saveLevel()">
+        <option value="入门新手">入门新手 (0.5~1.5s)</option>
+        <option value="初级">初级 (1.5~3s)</option>
+        <option value="中级">中级 (3~6s)</option>
+        <option value="高级">高级 (6~12s)</option>
+        <option value="职业">职业 (12~20s)</option>
+        <option value="自定义">自定义</option>
+      </select>
+    </div>
+    <div class="la-msg">选档位自动设定思考时间; 手动改下方参数会变为「自定义」</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>参数 (秒, 下次启动生效)</h3>
+    <div class="la-row"><label>思考下限</label><input type="number" id="cfg-tmin" min="0.5" max="100" step="0.5"></div>
+    <div class="la-row"><label>思考上限</label><input type="number" id="cfg-tmax" min="0.5" max="100" step="0.5"></div>
+    <div class="la-row"><label>轮询间隔</label><input type="number" id="cfg-interval" min="2" max="30" step="0.5"></div>
+    <div class="la-row"><button class="la-btn" onclick="saveCfg()">保存参数</button></div>
+  </div>
+
+  <div class="la-msg" id="la-msg"></div>
+</div>
+
+<div class="main">
+  <div class="board-wrap">
+    <img id="board" alt="棋盘" src="analysis_overlay.png">
+  </div>
+  <div class="sidebar">
+    <div class="card">
+      <div class="winhead">
+        <span class="side" id="sideInfo">--</span>
+        <span class="num" id="winNum">--</span>
+      </div>
+      <div class="winrow">
+        <span class="tagb">黑</span>
+        <div class="bar"><div class="b" id="barB"></div><div class="w" id="barW"></div></div>
+        <span class="tagw">白</span>
+      </div>
+      <div class="legend">
+        <span><i style="background:#f0b90b"></i>最佳选点</span>
+        <span><i style="background:#37d67a"></i>≥50%</span>
+        <span><i style="background:#e0a13c"></i>&lt;50%</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="winhead">
+        <span class="side" id="chTitle">AI 胜率走势</span>
+        <span class="num" id="chLast" style="font-size:13px;color:var(--muted)">--</span>
+      </div>
+      <canvas id="winChart" style="width:100%;height:100px;display:block"></canvas>
+    </div>
+    <div class="clist-title"><span>候选点 (传统坐标)</span><span id="cnt">0 个</span></div>
+    <div id="list"><div class="empty">等待 AI 计算…</div></div>
+  </div>
+</div>
+<script>
+var colorOf = function(win){ return win >= 50 ? '#37d67a' : (win >= 35 ? '#e0a13c' : '#e24b4a'); };
+
+// ---- 中国传统坐标转换 (GTP "J16" -> "九之十六") ----
+var GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
+var CN_DIG = '一二三四五六七八九十';
+function cnNum(n){
+  if (n < 1 || n > 19) return String(n);
+  if (n <= 10) return CN_DIG[n - 1];
+  return '十' + CN_DIG[n - 11];
+}
+function gtpToCn(pt){
+  var m = /^([A-T])(\d{1,2})$/.exec(pt || '');
+  if (!m) return pt;
+  return cnNum(GTP_COLS.indexOf(m[1]) + 1) + '之' + cnNum(parseInt(m[2], 10));
+}
+
+// ---- 启动器面板 ----
+var launcherOpen = false;
+var _laTick = 0;
+function toggleLauncher(){
+  launcherOpen = !launcherOpen;
+  document.getElementById('launcher-panel').classList.toggle('show', launcherOpen);
+  document.getElementById('launcher-btn').classList.toggle('on', launcherOpen);
+  if (launcherOpen) refreshStatus();
+}
+function setMsg(msg, ok){
+  var el = document.getElementById('la-msg');
+  el.textContent = msg || '';
+  el.className = 'la-msg ' + (ok === true ? 'ok' : (ok === false ? 'err' : ''));
+  if (msg) setTimeout(function(){ if (el.textContent === msg) { el.textContent = ''; el.className = 'la-msg'; } }, 6000);
+}
+function apiCall(path, body){
+  return fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: {'Content-Type': 'application/json'},
+    body: body ? JSON.stringify(body) : null,
+    cache: 'no-store'
+  }).then(function(r){ return r.json(); });
+}
+function refreshStatus(){
+  apiCall('/api/status').then(function(d){
+    if (!d || !d.ok) return;
+    var ai = document.getElementById('la-st-ai');
+    ai.textContent = d.controller.running ? '运行 PID ' + (d.controller.pids[0]||'?') : '停止';
+    ai.className = 'la-st ' + (d.controller.running ? 'run' : 'stop');
+    var ka = document.getElementById('la-st-katago');
+    ka.textContent = d.kata_preload.running ? ('运行 :' + d.kata_preload.port) : '停止';
+    ka.className = 'la-st ' + (d.kata_preload.running ? 'run' : 'stop');
+    var cfg = d.config || {};
+    document.getElementById('cfg-tmin').value = cfg.tmin;
+    document.getElementById('cfg-tmax').value = cfg.tmax;
+    document.getElementById('cfg-interval').value = cfg.interval;
+    // 档位下拉: 内置档位选中, 否则自定义
+    var lvSel = document.getElementById('cfg-level');
+    var hasLevel = d.levels && d.levels.some(function(l){ return l.name === cfg.level; });
+    if (hasLevel) lvSel.value = cfg.level;
+    else lvSel.value = '自定义';
+    // 平台下拉
+    var pfSel = document.getElementById('cfg-platform');
+    if (pfSel && cfg.platform) pfSel.value = cfg.platform;
+    // 平台中文名
+    var pfLabels = {'tencent': '腾讯围棋', 'xingzhen': '星阵围棋'};
+    var pfName = pfLabels[cfg.platform] || cfg.platform || '?';
+    document.getElementById('la-st-detail').textContent =
+      '对手: ' + pfName + ' · 档位: ' + (cfg.level || '自定义') + ' · 思考 ' + cfg.tmin + '~' + cfg.tmax + 's · 轮询 ' + cfg.interval + 's · 默认执' + (cfg.color === 'black' ? '黑' : '白') +
+      ' · 上次数据 ' + (d.data_ts || '--');
+  }).catch(function(){});
+}
+function saveLevel(){
+  var lv = document.getElementById('cfg-level').value;
+  apiCall('/api/config', {level: lv}).then(function(d){
+    setMsg(d.msg || '已保存', d.ok);
+    refreshStatus();
+  });
+}
+function savePlatform(){
+  var pf = document.getElementById('cfg-platform').value;
+  apiCall('/api/platform', {platform: pf}).then(function(d){
+    setMsg(d.msg || '已切换', d.ok);
+    refreshStatus();
+  });
+}
+function startAI(color){
+  if (!confirm('启动 AI controller, 执' + (color==='black'?'黑':'白') + '?')) return;
+  apiCall('/api/start', {color: color}).then(function(d){
+    setMsg(d.msg || (d.ok ? '已启动' : '启动失败'), d.ok);
+    refreshStatus();
+  });
+}
+function resetGame(color){
+  if (!confirm('重开一局, 切换执' + (color==='black'?'黑':'白') + ', AI 进程不重启. 确认?')) return;
+  apiCall('/api/reset', {color: color}).then(function(d){
+    setMsg(d.msg || (d.ok ? '已重置' : '重置失败'), d.ok);
+    refreshStatus();
+  });
+}
+function stopService(what){
+  if (!confirm('停止 ' + (what === 'ai' ? 'AI controller' : 'KataGo 预加载服务') + '?')) return;
+  apiCall('/api/stop', {what: what}).then(function(d){
+    setMsg(d.msg || '已停止', true);
+    refreshStatus();
+  });
+}
+function preload(){
+  setMsg('KataGo 启动中 (首次 60-90s)…', null);
+  apiCall('/api/preload', {}).then(function(d){
+    setMsg(d.msg || '', d.ok);
+    refreshStatus();
+  });
+}
+function saveCfg(){
+  var body = {
+    tmin: parseFloat(document.getElementById('cfg-tmin').value),
+    tmax: parseFloat(document.getElementById('cfg-tmax').value),
+    interval: parseFloat(document.getElementById('cfg-interval').value)
+  };
+  apiCall('/api/config', body).then(function(d){
+    setMsg(d.msg || (d.ok ? '已保存' : '保存失败'), d.ok);
+    refreshStatus();
+  });
+}
+
+// ---- 看板数据渲染 ----
+function updateBoard(){
+  var b = document.getElementById('board');
+  b.src = 'analysis_overlay.png?t=' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+}
+function render(d){
+  document.getElementById('ts').textContent = '更新 ' + d.ts;
+  if (d.stale){
+    var sideInfo = document.getElementById('sideInfo');
+    var detail = '棋盘已切换 · 等待 AI 同步';
+    if (d.reset) {
+      detail = '已重置对局 (执' + (d.reset.color === 'black' ? '黑' : '白') + ') · 等待 AI 同步新对局';
+    }
+    sideInfo.textContent = detail;
+    sideInfo.style.color = '#e0a13c';
+    document.getElementById('winNum').textContent = '--';
+    document.getElementById('barB').style.width = '50%';
+    document.getElementById('barW').style.width = '50%';
+    document.getElementById('cnt').textContent = '0 个';
+    document.getElementById('st').textContent = detail;
+    document.getElementById('list').innerHTML =
+      '<div class="empty">' + detail + '<br><span style="font-size:11px;color:#5a6472">(每 ~30s 自动刷新)</span></div>';
+    drawWinChart(null);
+    return;
+  }
+  document.getElementById('sideInfo').style.color = '';
+  // ---- AI 视角: ai_color + ai_win (后端已按 AI 执子颜色换算) ----
+  var aiColor = d.ai_color === 'white' ? 'W' : 'B';   // AI 执色
+  var aiWin = d.ai_win;                                // 0~100, AI 胜率
+  var aiSideCn = (aiColor === 'B') ? '⚫ AI (黑)' : '⚪ AI (白)';
+  // 黑方胜率 (供底部黑/白双条分布)
+  var blackWin = (aiColor === 'B') ? aiWin : (aiWin != null ? 100 - aiWin : null);
+  document.getElementById('sideInfo').textContent = aiSideCn + ' · KataGo 胜率';
+  document.getElementById('winNum').textContent =
+    (aiWin == null) ? '--' : aiWin.toFixed(1) + '%';
+  document.getElementById('barB').style.width = (blackWin == null ? 50 : Math.max(blackWin, 1)) + '%';
+  document.getElementById('barW').style.width = (blackWin == null ? 50 : Math.max(100 - blackWin, 1)) + '%';
+  document.getElementById('cnt').textContent = d.cands.length + ' 个';
+  document.getElementById('st').textContent =
+    aiSideCn + ' · 胜率 ' + (aiWin == null ? '--' : aiWin.toFixed(1) + '%')
+    + ' · 思考 ' + d.think_s + 's · 候选 ' + d.total + ' 个';
+  loadWinHistory();  // 异步拉取胜率历史画走势图
+
+  var list = document.getElementById('list');
+  if (!d.cands.length){
+    list.innerHTML = '<div class="empty">AI 思考中，候选点即将更新…<br><span style="font-size:11px;color:#5a6472">(每 ~30s 自动刷新)</span></div>';
+    return;
+  }
+  // 候选点: 直接显示"落该点后 AI 胜率" (ai_win), 不再区分行棋方/黑方
+  var html = '';
+  d.cands.forEach(function(c, i){
+    var aw = (c.ai_win != null) ? c.ai_win : c.win;   // AI 视角胜率
+    var col = colorOf(aw);
+    var barBg = (aiColor === 'B') ? 'background:#39424e' : 'background:#e0e0e0';  // AI 执色条
+    var scoreTxt = (c.score == null) ? '' : ((c.score > 0 ? '+' : '') + c.score.toFixed(1) + '目');
+    html += '<div class="cand' + (i===0 ? ' best' : '') + '">'
+      + '<span class="idx">' + (i===0 ? '★' : (i+1)) + '</span>'
+      + '<span class="pt" title="GTP ' + c.pt + '"><span class="cn">' + gtpToCn(c.pt) + '</span><span class="gtp">' + c.pt + '</span></span>'
+      + '<div class="bar" style="background:#333a44">'
+      +   '<div class="b" style="' + barBg + ';width:' + Math.max(aw, 1) + '%"></div>'
+      + '</div>'
+      + '<span class="pct" style="color:' + col + '">' + aw.toFixed(1) + '%</span>'
+      + '<span class="sub">' + scoreTxt + ' · ' + c.visits + '次</span>'
+      + '</div>';
+  });
+  list.innerHTML = html;
+}
+
+// ---- AI 胜率走势图 (canvas) ----
+function drawWinChart(his){
+  var c = document.getElementById('winChart');
+  if (!c) return;
+  var dpr = window.devicePixelRatio || 1;
+  var w = c.clientWidth || 260, h = c.clientHeight || 100;
+  c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  var g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  var pts = (his && his.pts) || [];
+  var aiCol = (his && his.ai_color);
+  var isWhite = (aiCol === 'white' || aiCol === 'W');  // 兼容 json('white') 与内部('W')
+  if (!pts || !pts.length){
+    g.fillStyle = '#5a6472'; g.font = '11px "Microsoft YaHei",sans-serif';
+    g.textAlign = 'center';
+    g.fillText('对局推进后显示 AI 胜率曲线', w / 2, h / 2 + 4);
+    return;
+  }
+  var padL = 30, padR = 8, padT = 8, padB = 16;
+  var plotW = w - padL - padR, plotH = h - padT - padB;
+  // x 轴范围: 0 ~ 手数(向上取整到10)
+  var maxX = 20;
+  pts.forEach(function(p){ if (p[0] != null && p[0] > maxX) maxX = p[0]; });
+  maxX = Math.ceil(maxX / 10) * 10;
+  var X = function(x){ return padL + (x / maxX) * plotW; };
+  var Y = function(y){ return padT + (1 - y / 100) * plotH; };
+  // 50% 中线 + 25/75 网格
+  g.strokeStyle = 'rgba(139,148,163,.28)'; g.lineWidth = 1;
+  g.setLineDash([3, 3]);
+  [25, 50, 75].forEach(function(v){
+    g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(w - padR, Y(v)); g.stroke();
+  });
+  g.setLineDash([]);
+  // y 轴刻度
+  g.fillStyle = '#6b7480'; g.font = '9px "Microsoft YaHei",sans-serif'; g.textAlign = 'right';
+  [0, 25, 50, 75, 100].forEach(function(v){ g.fillText(v + '%', padL - 3, Y(v) + 3); });
+  // x 轴刻度
+  g.textAlign = 'center';
+  g.fillText('0', X(0), h - 4);
+  g.fillText(maxX + '手', X(maxX), h - 4);
+  // 面积渐变
+  var grad = g.createLinearGradient(0, padT, 0, padT + plotH);
+  var lineCol = isWhite ? '#e0e0e0' : '#f0b90b';
+  var glow = isWhite ? 'rgba(224,224,224,' : 'rgba(240,185,11,';
+  grad.addColorStop(0, glow + '.35)');
+  grad.addColorStop(1, glow + '0)');
+  // 折线
+  var x0 = null, y0 = null;
+  var lastPt = null;
+  g.beginPath();
+  var started = false;
+  pts.forEach(function(p){
+    var px = X(p[0] == null ? 0 : p[0]), py = Y(Math.max(0, Math.min(100, p[1])));
+    if (!started){ g.moveTo(px, py); started = true; }
+    else g.lineTo(px, py);
+    lastPt = [px, py];
+  });
+  g.strokeStyle = lineCol; g.lineWidth = 1.8; g.stroke();
+  // 填充到 50 底部? 填充到 0(即h-padB) 更直观表示胜率面积
+  if (started){
+    var ctx2 = g;
+    ctx2.lineTo(lastPt[0], h - padB);
+    ctx2.lineTo(X(pts[0][0] == null ? 0 : pts[0][0]), h - padB);
+    ctx2.closePath();
+    ctx2.fillStyle = grad; ctx2.fill();
+  }
+  // 当前点
+  var lastV = pts[pts.length - 1];
+  if (lastPt && lastV[1] != null){
+    g.beginPath();
+    g.arc(lastPt[0], Y(Math.max(0, Math.min(100, lastV[1]))), 2.6, 0, Math.PI * 2);
+    g.fillStyle = lineCol; g.fill();
+  }
+  var cur = pts[pts.length - 1];
+  document.getElementById('chLast').textContent =
+    (isWhite ? '⚪ 白' : '⚫ 黑') + ' ' + (cur ? cur[1].toFixed(1) + '%' : '--');
+}
+function loadWinHistory(){
+  fetch('win_history.json?t=' + Date.now(), {cache: 'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(drawWinChart)
+    .catch(function(){});
+}
+
+function refresh(){
+  updateBoard();
+  fetch('data.json?t=' + Date.now(), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(render)
+    .catch(function(e){ document.getElementById('st').textContent = '读取失败: ' + e; });
+  _laTick++;
+  if (launcherOpen || _laTick % 3 === 1) refreshStatus();
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
