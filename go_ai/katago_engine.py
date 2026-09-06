@@ -22,22 +22,21 @@ N = 19
 EMPTY, BLACK, WHITE = 0, 1, 2
 
 
-# ---- KataGo 路径解析 (便携化, 无本机路径依赖) ----
-# 解析顺序: 环境变量 GOAI_KATAGO_ROOT (可指定自定义引擎目录)
-#          -> 代码目录同级 ../katago (便携包标准结构: <包>/go_ai + <包>/katago)
+# ---- KataGo 路径解析 (便携化) ----
+# 优先找代码目录同级 ../katago (便携包结构: <包>/go_ai + <包>/katago),
+# 找不到则回退本机原路径 D:\katago. 整目录拷到别的电脑后自动识别, 无需改代码.
 # 引擎根只需含 opencl171/katago.exe + gtp.cfg; 模型可单独下载/替换, 见 _resolve_model.
 def _find_katago_root():
     _base = os.path.dirname(os.path.abspath(__file__))
-    _cands = []
-    _env = os.environ.get('GOAI_KATAGO_ROOT')
-    if _env:
-        _cands.append(_env)
-    _cands.append(os.path.join(_base, '..', 'katago'))  # 便携包内
+    _cands = [
+        os.path.join(_base, '..', 'katago'),   # 便携包内
+        r'D:\katago',                           # 本机原部署位置
+    ]
     for _c in _cands:
         if (os.path.exists(os.path.join(_c, 'opencl171', 'katago.exe'))
                 and os.path.exists(os.path.join(_c, 'gtp.cfg'))):
             return _c
-    return _cands[-1]  # 都找不到时返回最后候选, 启动报错更明确
+    return _cands[-1]  # 都找不到时返回本机路径, 启动报错更明确
 
 
 def _resolve_model(root):
@@ -244,14 +243,15 @@ class KataGoEngine:
             self._send(f'fixed_handicap {handicap}')
 
     def set_board(self, stones, history=None):
-        """把棋盘同步给 KataGo. 该版本不支持 place_free/set_stones, 只能用 play 重建.
+        """把棋盘同步给 KataGo. 三种策略, 优先级从高到低:
 
-        history: 真实落子顺序 [(col, row, color), ...].
-            传入时按**真实顺序**逐手 play, KataGo 内部才能维护正确的劫(ko)状态,
-            在劫争时自动去找劫材, 而不是给出非法的"立即回提"手.
-            不传或重放失败时, 回退为"按位置排序 + 黑白交替"重建 —— 该方式会
-            破坏真实顺序, KataGo 无法得知劫点, 是此前打劫死循环的根因.
-        返回 True 表示按真实顺序重建成功, False 表示回退了交替重建."""
+        1. history 完整 -> 按**真实顺序**逐手 play (KataGo 内部 ko 状态正确,
+           劫争中主动找劫材; 从开局监视的对局走此路径)
+        2. 无完整历史(中途接入/漏读) -> **set_position 快照摆盘**: 直接把当前
+           读到的 19x19 盘面一次性设给 KataGo, 盘面与真实 100% 一致
+           (仅"接入瞬间恰在打劫"时缺劫点, 由候选切换/客户端拒绝兜底)
+        3. 快照失败(旧引擎不支持等) -> 兜底按位置排序交替重建 (盘面可能错)
+        返回 True 表示局面已精确同步, False 表示用了不可靠的交替重建."""
         if history:
             try:
                 self._send('clear_board')
@@ -263,14 +263,21 @@ class KataGoEngine:
                     self._send('play %s %s' % (name, self._pt_to_gtp(c, r)), timeout=10)
                 return True  # 真实顺序重建成功, ko 状态正确
             except Exception as e:
-                # 重放失败(如某帧漏读导致顺序非法) -> 清空后回退交替重建
+                # 重放失败(如某帧漏读导致顺序非法) -> 落空后改走快照
                 try:
                     self._send('clear_board')
                 except Exception:
                     pass
                 if self.log_cb:
-                    self.log_cb('[KataGo] 真实顺序重放失败(%s), 回退交替重建 (劫状态将丢失)' % e)
-        # ---- 回退: 按位置排序 + 黑白交替重建 ----
+                    self.log_cb('[KataGo] 真实顺序重放失败(%s), 改用快照摆盘' % e)
+        # ---- 策略 2: set_position 快照摆盘 (KataGo GTP 扩展, v1.17 支持) ----
+        try:
+            self._set_position_snapshot(stones)
+            return True
+        except Exception as e:
+            if self.log_cb:
+                self.log_cb('[KataGo] set_position 快照失败(%s), 兜底交替重建' % e)
+        # ---- 策略 3: 按位置排序 + 黑白交替重建 (仅兜底) ----
         self._send('clear_board')
         black_pts, white_pts = [], []
         for r in range(N):
@@ -293,7 +300,23 @@ class KataGoEngine:
         for color, pt in merged:
             name = 'B' if color == BLACK else 'W'
             self._send(f'play {name} {pt}', timeout=10)
-        return False  # 交替重建: ko 状态不可靠
+        return False  # 交替重建: 盘面/ko 均不可靠
+
+    def _set_position_snapshot(self, stones):
+        """用 GTP set_position 直接把 19x19 盘面快照设给 KataGo (无需落子顺序).
+        KataGo 文档: set_position 用颜色-坐标对指定初始局面并替换当前棋盘.
+        注意: 快照被视为无历史 -> 无劫(superko)限制, 无历史提子信息."""
+        toks = ['set_position']
+        for r in range(N):
+            for c in range(N):
+                v = int(stones[r][c])
+                if v == BLACK:
+                    toks.append('B')
+                    toks.append(self._pt_to_gtp(c, r))
+                elif v == WHITE:
+                    toks.append('W')
+                    toks.append(self._pt_to_gtp(c, r))
+        self._send(' '.join(toks), timeout=15)
 
     def genmove(self, color, max_time=None):
         """生成着法. 返回 (col, row) 或 (-1,-1) pass. 搜索耗时按 maxTime+10 超时.
