@@ -144,8 +144,10 @@ def _wood_mask(roi):
     return mask
 
 
-def detect_board(img, roi_x_max=1280, window_rect=None, debug=False):
+def detect_board(img, roi_x_max=None, window_rect=None, debug=False):
     h, w = img.shape[:2]
+    if roi_x_max is None:
+        roi_x_max = max(960, int(w * 0.5))  # 默认屏幕左半, 随分辨率自适应 (2K=1280, 1080p=960)
     if window_rect is not None:
         # 窗口锁定: 只在腾讯围棋窗口内搜索棋盘
         ox, oy, ox1, oy1 = window_rect

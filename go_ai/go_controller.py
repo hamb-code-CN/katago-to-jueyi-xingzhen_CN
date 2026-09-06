@@ -361,6 +361,15 @@ def main():
     args = p.parse_args()
 
     cfg = Config()
+    # 屏幕分辨率自适应 (最低要求 1080p)
+    scr_w, scr_h = pyautogui.size()
+    if scr_w < 1920 or scr_h < 1080:
+        print(f'[错误] 屏幕分辨率 {scr_w}x{scr_h} 低于最低要求 1920x1080 (1080p), 无法保证棋盘识别.')
+        input('按回车退出...')
+        sys.exit(1)
+    cfg.SCREEN_W, cfg.SCREEN_H = scr_w, scr_h
+    cfg.BOARD_ROI_X_MAX = max(960, int(scr_w * 0.5))  # 棋盘软件假定在屏幕左半 (2K=1280, 1080p=960)
+    print(f'[启动] 屏幕 {scr_w}x{scr_h}, 棋盘搜索区域 x<{cfg.BOARD_ROI_X_MAX}')
     cfg.MY_COLOR = BLACK if args.color == 'black' else WHITE
     cfg.SCREENSHOT_INTERVAL = args.interval
     if args.think:
