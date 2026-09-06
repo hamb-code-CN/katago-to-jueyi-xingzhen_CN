@@ -19,19 +19,19 @@ Because of that, it works with **any Go client that can display a board**. Curre
 
 ## Features
 
-- 🤖 **KataGo decision engine**: persistent local service with preloaded model — no cold start per move; falls back to a built-in lightweight engine when KataGo is unavailable
-- 🎯 **Strong play**: the default network already beats top online AIs (Xingzhen 3-star, Jueyi 9-dan, etc.) — depth is bounded by the per-move thinking time *you* set
-- 🎲 **Human-like rhythm**: randomized thinking time per move (anti-bot-detection); when losing badly mid-game (≥60 moves, win-rate <30%) it automatically extends thinking (up to 20s)
-- ⚖️ **Ko handling**: tracks the true move history frame-by-frame and syncs it to KataGo; actively looks for ko threats; a local legality check blocks illegal recaptures
-- 🛡️ **Illegal-move auto-fallback**: if the best candidate is occupied / ko / forbidden, it automatically plays KataGo's **next-best candidate from the same search** — never retries the same illegal point (no infinite loops)
-- 🔀 **Join mid-game with full accuracy**: without complete move history it uses KataGo's native `set_position` snapshot — board matches reality 100% (only the ko point at the join instant is missing, which is safely skipped), no need to watch from move 1
-- 🖥️ **Live dashboard** (http://127.0.0.1:8123/analysis.html):
+-  **KataGo decision engine**: persistent local service with preloaded model — no cold start per move; falls back to a built-in lightweight engine when KataGo is unavailable
+-  **Strong play**: the default network already beats top online AIs (Xingzhen 3-star, Jueyi 9-dan, etc.) — depth is bounded by the per-move thinking time *you* set
+-  **Human-like rhythm**: randomized thinking time per move (anti-bot-detection); when losing badly mid-game (≥60 moves, win-rate <30%) it automatically extends thinking (up to 20s)
+-  **Ko handling**: tracks the true move history frame-by-frame and syncs it to KataGo; actively looks for ko threats; a local legality check blocks illegal recaptures
+-  **Illegal-move auto-fallback**: if the best candidate is occupied / ko / forbidden, it automatically plays KataGo's **next-best candidate from the same search** — never retries the same illegal point (no infinite loops)
+-  **Join mid-game with full accuracy**: without complete move history it uses KataGo's native `set_position` snapshot — board matches reality 100% (only the ko point at the join instant is missing, which is safely skipped), no need to watch from move 1
+-  **Live dashboard** (http://127.0.0.1:8123/analysis.html):
   - Board overlay: recommended candidate points, best move, coordinate axes
   - Candidate list (traditional Chinese coordinates) — shows **post-move AI win-rate** (auto-converted to the AI's color)
   - **AI win-rate trend chart** (auto-resets on a new game)
   - Web launcher: start/stop, restart a game (no process restart), strength level, opponent platform switch
   - Reachable over LAN / mobile (IPv4 + IPv6)
-- 🗂️ **Dual-platform adaptation**: handles window move, resize and minimize (PrintWindow path on Tencent) for reliable capture
+-  **Dual-platform adaptation**: handles window move, resize and minimize (PrintWindow path on Tencent) for reliable capture
 
 ---
 
