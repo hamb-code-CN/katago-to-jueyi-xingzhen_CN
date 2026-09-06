@@ -80,6 +80,7 @@ class KataGoEngine:
         self.log_cb = log_cb
         self.proc = None
         self.lock = threading.Lock()
+        self._pending = []  # 超时命令的迟到响应读取线程 (下次发命令前排空)
 
     def start(self, wait_ready=True):
         if self.proc and self.proc.poll() is None:
@@ -138,8 +139,18 @@ class KataGoEngine:
                 pass
         self.proc = None
 
+    def _flush_pending(self, timeout=45.0):
+        """排空此前超时命令的迟到响应, 保证 GTP 请求/响应一一对应."""
+        for th in getattr(self, "_pending", []):
+            try:
+                th.join(timeout)
+            except Exception:
+                pass
+        self._pending = []
+
     def _send(self, cmd, timeout=10.0):
         """发命令, 读响应. 返回响应文本 (不含 =/?)"""
+        self._flush_pending()
         if self.proc is None or self.proc.poll() is not None:
             raise RuntimeError('KataGo 进程未运行')
         # 清空可能残留的 stderr 不阻塞 (用非阻塞读丢弃)
@@ -160,6 +171,7 @@ class KataGoEngine:
         t.start()
         t.join(timeout)
         if t.is_alive():
+            self._pending.append(t)  # 迟到响应由 _flush_pending 排空
             raise TimeoutError(f'KataGo 响应超时: {cmd}')
         if 'err' in result:
             raise RuntimeError(f'KataGo 读取失败: {result["err"]}')
@@ -184,6 +196,7 @@ class KataGoEngine:
     def _send_multiline(self, cmd, timeout=15.0):
         """发命令并读取多行响应 (kata-analyze 等), 直到空行或超时.
         返回内容行列表 (不含 GTP 前缀行 '= ...' 与结尾空行)."""
+        self._flush_pending()
         if self.proc is None or self.proc.poll() is not None:
             raise RuntimeError('KataGo 进程未运行')
         try:
@@ -207,6 +220,7 @@ class KataGoEngine:
         t.start()
         t.join(timeout)
         if t.is_alive():
+            self._pending.append(t)
             raise TimeoutError(f'KataGo 多行响应超时: {cmd}')
         # 去掉首行 GTP 前缀行 (="..."/"?..."), 返回内容行
         out = []
