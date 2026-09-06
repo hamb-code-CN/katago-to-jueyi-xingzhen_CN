@@ -85,7 +85,20 @@ class KataService:
             return {'ok': False, 'err': str(e)}
 
 
+def _port_in_use(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+    finally:
+        s.close()
+
+
 def serve(port, max_time):
+    if _port_in_use(port):
+        print(f'[kata-service] 端口 {port} 已有 KataGo 服务在运行, 本实例退出 (不重复拉起引擎)',
+              flush=True)
+        return 0
     svc = KataService(port, max_time)
     # 启动引擎 (冷加载一次)
     try:
