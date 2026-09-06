@@ -22,3 +22,4 @@ katago/opencl171/KataGoData/
 
 # KataGo 网络权重模型 (~93MB): 不纳入版本库, 请自行下载后放入 katago/ (见 README)
 katago/*.bin.gz
+_command.json
