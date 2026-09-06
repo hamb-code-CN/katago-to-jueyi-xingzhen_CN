@@ -85,6 +85,7 @@ see "Model download & loading" below. (The source-only GitHub repo likewise ship
 - Windows 10/11 (x64)
 - Python 3.10–3.12 (check **Add Python to PATH** during install)
 - A working OpenCL device (NVIDIA / AMD / Intel; dedicated NVIDIA GPU works best)
+- **Screen: 1920×1080 (1080p) minimum** — resolution is auto-detected at startup; the board search region adapts to the screen width (1080p → x<960, 2K → x<1280, wider screens scale proportionally). Verified on 2K (2560×1440).
 
 ---
 
@@ -196,6 +197,25 @@ each loop:
 ```
 
 Full architecture & data flow: see `go_ai/GO_AI_ARCHITECTURE.md`
+
+---
+
+## Changelog
+
+### v1.0.0 (2026-09-06)
+
+First public release.
+
+- **Core**: screen-vision Go auto-player — board recognition (grid refinement + stone reading), KataGo (GTP) decision engine, mouse click & confirm loop; supports Tencent Weiqi (Fox) and Xingzhen web clients
+- **Dashboard**: web analysis board (`http://127.0.0.1:8123/analysis.html`) with board overlay, top candidates, win-rate; one-click start/stop per color; **startup gate** — KataGo preload / OpenCL tuning progress (`Tuning x/55`) is visualized, dashboard unlocks when the engine is ready
+- **Launcher**: `启动围棋AI.bat` auto-creates venv and installs dependencies on first run
+- **Screen**: resolution auto-detection at startup; board search region scales with screen width (min 1080p)
+- **Fixes**:
+  - launcher script rewritten with `goto` labels (nested parenthesized blocks caused cmd parse failure & instant exit)
+  - `.gitattributes` forces CRLF for `.bat/.cmd/.ps1`
+  - `cv2.imwrite` replaced with Unicode-safe writing (non-ASCII install paths on Windows silently failed)
+  - GTP stream de-sync fix: late responses from timed-out commands are drained before the next command (engine no longer "freeze" into consecutive passes)
+  - `kata_service` checks port 8124 before starting (prevents duplicate engines fighting over the GPU)
 
 ---
 
