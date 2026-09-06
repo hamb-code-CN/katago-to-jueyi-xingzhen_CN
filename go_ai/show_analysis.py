@@ -205,6 +205,14 @@ def fallback_pts(board):
     return {'pts': pts, 'step': step}
 
 
+def _imwrite_unicode(path, img):
+    """cv2.imwrite 不支持含中文的路径 (Windows), 用 imencode+tofile 兼容."""
+    ok, buf = cv2.imencode(".png", img)
+    if ok:
+        buf.tofile(path)
+    return ok
+
+
 def draw(show_osd=False, stale=False):
     """show_osd: 是否在图上画 OSD 信息条 (默认不画, 前端顶栏已显示状态, 图更纯净)
     stale: 屏幕棋盘与日志局面不一致(换对局)时, 不画候选点圈"""
@@ -231,7 +239,7 @@ def draw(show_osd=False, stale=False):
         if stale:
             cv2.putText(img_bgr, 'NEW GAME - 等待 AI 计算', (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 220, 255), 2, cv2.LINE_AA)
-        cv2.imwrite(OUT, img_bgr)
+        _imwrite_unicode(OUT, img_bgr)
         return OUT
 
     cands = sorted(data['cands'], key=lambda c: (-c['visits'], -c['win']))
@@ -267,7 +275,7 @@ def draw(show_osd=False, stale=False):
         cv2.putText(img_bgr, line1, (20, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(img_bgr, line2, (20, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (80, 220, 255), 2, cv2.LINE_AA)
 
-    cv2.imwrite(OUT, img_bgr)
+    _imwrite_unicode(OUT, img_bgr)
     return OUT
 
 
