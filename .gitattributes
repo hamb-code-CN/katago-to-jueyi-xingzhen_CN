@@ -1,0 +1,11 @@
+# Windows batch files MUST keep CRLF line endings.
+# cmd.exe fails to parse nested multi-line parenthesized blocks
+# (e.g. `if not exist ... ( ... if errorlevel 1 ( ... ) ... )`)
+# when the file uses LF-only endings: the batch aborts instantly
+# and the console window just flashes away.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts stay LF
+*.sh text eol=lf
