@@ -74,6 +74,43 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
 </style>
 </head>
 <body>
+<div id="gate">
+  <style>
+    #gate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;
+      background:var(--bg,#14181f);font-family:inherit}
+    #gate.hidden{display:none}
+    .gate-card{width:min(560px,92vw);background:var(--panel,#1c212b);border:1px solid var(--border,#333b48);
+      border-radius:14px;padding:26px 28px;box-shadow:0 12px 48px rgba(0,0,0,.45)}
+    .gate-card h2{margin:0 0 6px;font-size:18px;color:var(--text,#e8eaed)}
+    .gate-state{margin:14px 0 10px;font-size:14px;color:var(--gold,#f0b90b);min-height:20px}
+    .gate-bar{height:12px;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden}
+    .gate-bar-fill{height:100%;width:0%;border-radius:6px;
+      background:linear-gradient(90deg,#f0b90b,#ffd75e);transition:width .6s ease}
+    .gate-sub{margin-top:8px;font-size:12px;color:var(--dim,#9aa4b2);min-height:16px}
+    .gate-log{margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.3);
+      font:11px/1.6 Consolas,monospace;color:#7fd8a0;height:120px;overflow-y:auto;white-space:pre-wrap;
+      word-break:break-all}
+    .gate-actions{margin-top:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+    .gate-actions button{padding:9px 22px;border-radius:8px;border:1px solid var(--border,#333b48);
+      background:linear-gradient(180deg,#f0b90b,#d9a40a);color:#14181f;font-weight:700;cursor:pointer;font-size:14px}
+    .gate-actions button:hover{filter:brightness(1.1)}
+    .gate-skip{font-size:12px;color:var(--dim,#9aa4b2);cursor:pointer;text-decoration:none;border-bottom:1px dashed #555}
+    .gate-spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(240,185,11,.3);
+      border-top-color:#f0b90b;border-radius:50%;animation:gate-rot .8s linear infinite;vertical-align:-2px;margin-right:6px}
+    @keyframes gate-rot{to{transform:rotate(360deg)}}
+  </style>
+  <div class="gate-card">
+    <h2><span class="gate-spin" id="gate-spin"></span>KataGo 引擎启动中</h2>
+    <div class="gate-state" id="gate-state">正在检测引擎状态…</div>
+    <div class="gate-bar"><div class="gate-bar-fill" id="gate-fill"></div></div>
+    <div class="gate-sub" id="gate-sub">准备中…</div>
+    <div class="gate-log" id="gate-log">(等待引擎日志)</div>
+    <div class="gate-actions">
+      <button id="gate-btn" onclick="gatePreload()">▶ 启动 KataGo 预加载</button>
+      <a class="gate-skip" href="javascript:;" onclick="gateSkip()">跳过等待，直接进入（可能无 KataGo，走本地引擎）</a>
+    </div>
+  </div>
+</div>
 <div class="topbar">
   <h1>KataGo 实时分析</h1>
   <span class="tag">● 实时计算</span>
@@ -485,6 +522,85 @@ function refresh(){
 }
 refresh();
 setInterval(refresh, 2000);
+
+/* ===== KataGo 启动闸门: 预加载/调优完成前遮罩看板 ===== */
+var _gateT = null, _gateAuto = false;
+var $ = function(id){ return document.getElementById(id); };
+function gateShow(){
+  var g = $('gate'); if (g) g.classList.remove('hidden');
+}
+function gateHide(){
+  var g = $('gate'); if (g) g.classList.add('hidden');
+  if (_gateT){ clearInterval(_gateT); _gateT = null; }
+}
+function gateLogLine(d){
+  var tail = (d && d.log_tail) || [];
+  if (!tail.length) return '(等待引擎日志)';
+  return tail.slice(-6).join('\n');
+}
+function gatePreload(){
+  var btn = $('gate-btn');
+  if (btn){ btn.disabled = true; btn.textContent = '启动中…'; }
+  apiCall('/api/preload', {}).then(function(d){
+    if (btn){ btn.disabled = false; btn.textContent = '▶ 启动 KataGo 预加载'; }
+    if (d && d.ok){ _gateAuto = true; gatePoll(); }
+    else if (d && d.err){
+      $('gate-state').textContent = '启动失败: ' + d.err;
+      $('gate-state').style.color = '#ff6b6b';
+    }
+  }).catch(function(){
+    if (btn){ btn.disabled = false; btn.textContent = '▶ 启动 KataGo 预加载'; }
+  });
+}
+function gateSkip(){
+  if (!confirm('KataGo 尚未就绪，直接进入将无法使用 KataGo（AI 会回退到本地弱引擎）。仍要继续？')) return;
+  gateHide();
+}
+function gatePoll(){
+  apiCall('/api/kata_progress').then(function(d){
+    if (!d || !d.ok) throw new Error('bad');
+    var ready = !!(d.preload && d.preload.running);
+    if (ready){                       // 引擎服务已监听 = 调优+加载完成
+      gateHide();
+      refreshStatus();
+      return;
+    }
+    var st = $('gate-state'), fill = $('gate-fill'), sub = $('gate-sub'), lg = $('gate-log');
+    var step = d.tuning && d.tuning.step, total = d.tuning && d.tuning.total;
+    var spinning = (d.cold_start || step != null);
+    var spin = $('gate-spin');
+    if (spin){ spin.style.display = spinning ? '' : 'none'; }
+    if (spin && !spinning){ spin.style.animation = 'none'; }
+    if (step != null && total){
+      var pct = Math.round(step / total * 100);
+      fill.style.width = pct + '%';
+      st.textContent = 'OpenCL 调优中…  ' + step + ' / ' + total + '  (' + pct + '%)';
+      sub.textContent = '调优完成后自动进入看板（首次约 1-4 分钟，之后有缓存只需几秒）';
+    } else if (d.cold_start){
+      fill.style.width = '100%';
+      fill.style.background = 'linear-gradient(90deg,#3b82f6,#60a5fa)';
+      st.textContent = 'KataGo 冷启动中…（加载模型/初始化 OpenCL）';
+      sub.textContent = '引擎就绪后自动进入看板，请稍候';
+    } else {
+      fill.style.width = '0%';
+      st.textContent = 'KataGo 预加载未启动';
+      st.style.color = '';
+      sub.textContent = '点下方按钮启动预加载（或确认你的围棋客户端已就绪）';
+      $('gate-btn').style.display = '';
+      _gateAuto = false;
+    }
+    lg.textContent = gateLogLine(d);
+    lg.scrollTop = lg.scrollHeight;
+  }).catch(function(){
+    $('gate-state').textContent = '连接看板服务中…（服务重启时自动恢复）';
+    $('gate-log').textContent = '(看板服务暂不可达)';
+  });
+}
+(function(){
+  gateShow();
+  gatePoll();
+  _gateT = setInterval(gatePoll, 1500);
+})();
 </script>
 </body>
 </html>

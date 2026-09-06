@@ -219,6 +219,8 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.split('?')[0] == '/api/status':
             return self._send_json(api_status())
+        if self.path.split('?')[0] == '/api/kata_progress':
+            return self._send_json(api_kata_progress())
         return super().do_GET()
 
     def do_POST(self):
@@ -267,6 +269,38 @@ def api_status():
         'levels': [{'name': k, 'tmin': v[0], 'tmax': v[1]} for k, v in LEVELS.items()],
         'platforms': [{'id': p, 'label': PLATFORM_LABELS[p]} for p in PLATFORMS],
         'data_ts': last_ts,
+    }
+
+
+def api_kata_progress():
+    """KataGo 预加载/OpenCL 调优进度 (供看板启动闸门轮询).
+
+    preload.running = 引擎服务已就绪 (端口可连, 即调优+加载完成)
+    tuning.step/total = 最近一次调优进度 (Tuning x/55)
+    cold_start = 最近日志正处于冷启动阶段
+    """
+    _ctrl_r, _watch_r, svc, _cl, _wl = is_running()
+    log_path = os.path.join(OUT_DIR, 'kata_service.log')
+    lines = []
+    try:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            lines = f.read().splitlines()
+    except Exception:
+        pass
+    step = total = None
+    for ln in reversed(lines):
+        m = re.search(r'Tuning\s+(\d+)/(\d+)', ln)
+        if m:
+            step, total = int(m.group(1)), int(m.group(2))
+            break
+    cold = any('冷启动 KataGo' in ln or 'Tuning ' in ln or 'KataGo 启动失败' in ln
+               for ln in lines[-8:])
+    return {
+        'ok': True,
+        'preload': {'running': bool(svc), 'port': SERVICE_PORT},
+        'tuning': {'step': step, 'total': total},
+        'cold_start': cold,
+        'log_tail': lines[-18:],
     }
 
 
