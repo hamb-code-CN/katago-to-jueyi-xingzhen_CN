@@ -28,6 +28,8 @@ import random
 
 from go_vision import detect_board, read_board, N, board_to_pixel, detect_turn_side, refine_pts, snap_to_cal, find_go_window, find_browser_window, capture_go_window
 from go_engine import Board, select_move, BLACK, WHITE, EMPTY
+# 读取 KataGo 每次搜索的候选点列表 (gtp_logs), 供"最佳点非法时自动切换次优"使用
+from show_analysis import find_latest_valid_log, extract_last_search
 try:
     from seal_turn_detect import detect_turn_side as seal_detect
     SEAL_OCR_AVAILABLE = True
@@ -170,6 +172,44 @@ def history_matches(move_history, stones):
             if b.g[r][c] != int(stones[r][c]):
                 return False
     return True
+
+
+def katago_candidates():
+    """解析 KataGo 最近一次搜索的候选点列表 (gtp_logs, 与看板同源).
+    返回 [(row, col, visits), ...] 按 visits 降序 (即引擎自身排序的优劣顺序).
+    失败/无日志返回 []. 仅在决策点非法时调用, 频率极低."""
+    try:
+        logp = find_latest_valid_log()
+        if not logp:
+            return []
+        d = extract_last_search(logp)
+        if not d or not d.get('cands'):
+            return []
+        cs = sorted(d['cands'], key=lambda x: -(x.get('visits') or 0))
+        out = []
+        for c in cs:
+            r_, c_ = c.get('row'), c.get('col')
+            if r_ is not None and c_ is not None:
+                out.append((int(r_), int(c_), int(c.get('visits') or 0)))
+        return out
+    except Exception:
+        return []
+
+
+def next_legal_candidate(stones, legal_board, tried, my_color):
+    """在 KataGo 候选列表里, 跳过已试/已占/劫·禁手点, 返回第一个可合法落子的点.
+    tried: {(col,row),...} 已尝试且被拒的点. 找不到返回 None."""
+    for r_, c_, _v in katago_candidates():
+        if not (0 <= c_ < N and 0 <= r_ < N):
+            continue
+        if (c_, r_) in tried:
+            continue
+        if stones[r_, c_] != EMPTY:
+            continue
+        if not legal_board.is_legal(c_, r_, my_color):
+            continue
+        return (c_, r_)
+    return None
 
 
 def clamp_random(lo, hi, rng=None):
@@ -525,29 +565,35 @@ def main():
             mv = result['mv']
             print(f"[{cycle}] 决策: ({mv[0]}, {mv[1]}) 用时 {result.get('dt', 0):.2f}s")
 
-        # === 4.5) 决策合法性校验 (含劫) ===
-        #   非法情形:
-        #     1) 已占: set_board 漏读某子, KataGo 视角少子, 会下到已占位置 -> 客户端拒绝
-        #     2) 劫/自杀/禁手: 空点但非法. 劫点由真实历史还原 (move_history), 本地 is_legal 拦截
-        #   非法则重截图+重读+重决策; 重试后仍非法 -> 本轮放弃落子 (杜绝反复强行走劫点死循环)
-        #   注意: legal_check 必须 _stones_to_board(history) 重建, 否则 ko=None 拦不住劫点.
-        for retry in range(4):
+        # === 4.5) 决策合法性校验 (含劫) + 非法自动切换次优候选 ===
+        #   非法情形: 1) 已占(KataGo 视角与读盘不一致)  2) 劫/自杀/禁手
+        #   策略: 最佳点非法 -> 自动切换到 KataGo 本次搜索的下一候选 (gtp_logs, 与看板同源),
+        #         跳过已试/已占/劫·禁手点; 候选列表无可用的 -> 重截图让 KataGo 重算;
+        #         多轮仍无可用 -> 本轮放弃落子 (杜绝无限循环强行走同一非法点)
+        tried = set()
+        for retry in range(6):
             legal_check = _stones_to_board(stones, cfg.MY_COLOR, move_history)
             if katago is None or mv == (-1, -1) or not (0 <= mv[0] < N and 0 <= mv[1] < N):
                 break  # 虚着/无引擎, 无需校验
-            if stones[mv[1], mv[0]] != EMPTY:
-                reason = '已占'
-            elif not legal_check.is_legal(mv[0], mv[1], cfg.MY_COLOR):
-                reason = '劫/自杀/禁手'
-            else:
+            occupied = stones[mv[1], mv[0]] != EMPTY
+            if not occupied and legal_check.is_legal(mv[0], mv[1], cfg.MY_COLOR):
                 break  # 决策点合法且为空, 通过
-            if retry >= 3:
-                # 已重试多次仍非法 -> 放弃本轮, 等对方落子/局面变化, 防死循环
-                print(f"[{cycle}] 决策点 ({mv[0]},{mv[1]}) 经重试仍非法 ({reason}), 本轮放弃落子")
+            reason = '已占' if occupied else '劫/自杀/禁手'
+            tried.add((mv[0], mv[1]))
+            # 1) 自动切换 KataGo 本次搜索的下一合法候选点
+            alt = next_legal_candidate(stones, legal_check, tried, cfg.MY_COLOR)
+            if alt is not None:
+                print(f"[{cycle}] 决策点 ({mv[0]},{mv[1]}) {reason}, 自动改下候选 ({alt[0]},{alt[1]})")
+                mv = alt
+                break
+            # 2) 候选列表无可用的(可能局面已变) -> 重截图刷新, 让 KataGo 重算
+            if retry >= 4:
+                # 仍无可下点 -> 放弃本轮, 等对方落子/局面变化, 防死循环
+                print(f"[{cycle}] 决策点 ({mv[0]},{mv[1]}) {reason} 且无可用候选, 本轮放弃落子")
                 prev_stones = stones
                 time.sleep(cfg.SCREENSHOT_INTERVAL)
                 continue
-            print(f"[{cycle}] 决策点 ({mv[0]},{mv[1]}) 非法 ({reason}), retry {retry+1} 换点")
+            print(f"[{cycle}] 决策点 ({mv[0]},{mv[1]}) {reason}, retry {retry+1} 重算")
             img_v, win_rect = take_screenshot(None)
             if win_rect:
                 cfg.GO_WINDOW = win_rect
