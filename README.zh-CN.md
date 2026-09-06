@@ -60,6 +60,24 @@
 
 ---
 
+## 随包 AI 说明（仅用于测试）
+
+完整离线包（zip）自带：
+
+| 组件 | 内容 | 出处 |
+|---|---|---|
+| 引擎 | `katago/opencl171/katago.exe`（**KataGo v1.17.1** OpenCL 版） | [lightvector/KataGo](https://github.com/lightvector/KataGo)，作者 David J Wu，MIT License |
+| 权重 | `katago/kata-b18c384nbt.bin.gz`（即官方 **kata1-b18c384nbt**，18 blocks / 384 channels） | 同上（KataGo 默认网络之一） |
+
+> ⚠️ **该模型为较早期的中等强度网络，随包仅用于测试与体验，不代表 KataGo 的真实棋力上限。**
+> 默认权重即可战胜多数普通玩家，但离"最强"还差得远。
+
+想要更强棋力？到 [KataGo Releases](https://github.com/lightvector/KataGo/releases) 自行下载更新的网络
+（如 `b28c512`、`b60`、最新 `kata1-*` 系列），放入 `katago\` 即可 —— 详见下文「模型下载与加载」。
+（源码版 GitHub 仓库同样自带引擎、不含权重。）
+
+---
+
 ## 环境要求
 
 - Windows 10/11（x64）

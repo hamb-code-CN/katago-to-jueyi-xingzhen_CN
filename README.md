@@ -62,6 +62,24 @@ Because of that, it works with **any Go client that can display a board**. Curre
 
 ---
 
+## Bundled AI (for testing only)
+
+The full offline package (zip) ships with:
+
+| Component | What | Source |
+|---|---|---|
+| Engine | `katago/opencl171/katago.exe` (**KataGo v1.17.1**, OpenCL build) | [lightvector/KataGo](https://github.com/lightvector/KataGo) by David J Wu, MIT License |
+| Weights | `katago/kata-b18c384nbt.bin.gz` (official **kata1-b18c384nbt**, 18 blocks / 384 channels) | same (one of KataGo's default nets) |
+
+> ⚠️ **This bundled model is an older, mid-tier network and is included FOR TESTING AND EXPERIENCE ONLY —
+> it does NOT represent KataGo's full strength.** It already beats most casual players, but it is far from the best.
+
+For serious strength, download a newer net yourself (`b28c512`, `b60`, latest `kata1-*` releases) from
+[KataGo Releases](https://github.com/lightvector/KataGo/releases) and drop it into `katago\` —
+see "Model download & loading" below. (The source-only GitHub repo likewise ships the engine but no weights.)
+
+---
+
 ## Requirements
 
 - Windows 10/11 (x64)
