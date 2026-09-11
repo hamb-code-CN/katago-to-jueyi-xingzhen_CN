@@ -17,7 +17,8 @@ import cv2
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, OUT_DIR)
-from show_analysis import find_latest_valid_log, extract_last_search, draw
+from show_analysis import (find_latest_valid_log, extract_last_search, draw,
+                          read_tail_text, prune_gtp_logs)
 from go_vision import detect_board, read_board, refine_pts, N
 from go_controller import count_stones
 import go_launcher as L
@@ -155,8 +156,21 @@ def build_json(data, stale=False, cur=None, log=None, ai_color='black'):
 
 
 def loop():
+    _prune_tick = 0
+    try:
+        prune_gtp_logs()      # 启动先清一次旧日志
+    except Exception:
+        pass
     while True:
         try:
+            _prune_tick += 1
+            if _prune_tick % 300 == 0:     # 约每 10 分钟(2s 周期)清一次
+                try:
+                    n = prune_gtp_logs()
+                    if n:
+                        print(f'[prune] 清理 {n} 个旧 gtp 日志')
+                except Exception:
+                    pass
             log = find_latest_valid_log()
             if log:
                 data = extract_last_search(log)
@@ -283,8 +297,7 @@ def api_kata_progress():
     log_path = os.path.join(OUT_DIR, 'kata_service.log')
     lines = []
     try:
-        with open(log_path, encoding='utf-8', errors='replace') as f:
-            lines = f.read().splitlines()
+        lines = read_tail_text(log_path, 128 * 1024).splitlines()   # 只读尾部 128KB
     except Exception:
         pass
     step = total = None
@@ -448,9 +461,14 @@ def api_reset(body):
 
 
 class DualStackServer(socketserver.ThreadingTCPServer):
-    """IPv6 socket 双栈监听 (IPv4 + IPv6 同时可访问)."""
+    """IPv6 socket 双栈监听 (IPv4 + IPv6 同时可访问).
+
+    daemon_threads/block_on_close: 每个请求线程用完即弃, 不保留在 _threads 列表里
+    (默认配置下该列表只增不减, 长时间轮询会持续吃内存)."""
     address_family = socket.AF_INET6
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
 
     def server_bind(self):
         try:

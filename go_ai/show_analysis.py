@@ -21,6 +21,60 @@ def _resolve_log_dir():
 
 
 LOG_DIR = _resolve_log_dir()
+
+
+# ---------------- 内存优化: 尾部读取 / 日志轮转 ----------------
+TAIL_SIZES = (256 * 1024, 4 * 1024 * 1024)   # 先试 256KB, 尾块不足再放大到 4MB
+
+
+def read_tail_text(path, max_bytes):
+    """只读文件末尾 max_bytes 字节 (内存恒定, 不随日志增长).
+    返回 text; 若截断则丢掉首个不完整行."""
+    with open(path, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        start = max(0, size - max_bytes)
+        f.seek(start)
+        data = f.read()
+    text = data.decode('utf-8', errors='ignore')
+    if start > 0:
+        nl = text.find('\n')
+        text = text[nl + 1:] if nl >= 0 else ''
+    return text
+
+
+def prune_gtp_logs(keep=6, max_total_mb=256):
+    """清理 gtp_logs: 只保留最新 keep 个; 目录总量超限时再从旧到新删.
+    正在被 KataGo 写入的文件在 Windows 上删不掉, 失败跳过即可."""
+    try:
+        files = [os.path.join(LOG_DIR, n) for n in os.listdir(LOG_DIR)
+                 if n.endswith('.log')]
+    except OSError:
+        return 0
+    if not files:
+        return 0
+    files.sort(key=os.path.getmtime, reverse=True)
+    removed = 0
+    for p in files[keep:]:
+        try:
+            os.remove(p)
+            removed += 1
+        except OSError:
+            pass
+    alive = [p for p in files[:keep] if os.path.exists(p)]
+    total = sum(os.path.getsize(p) for p in alive)
+    if total > max_total_mb * 1048576:
+        for p in reversed(alive[1:]):          # 从旧到新删, 保留最新那个
+            try:
+                total -= os.path.getsize(p)
+                os.remove(p)
+                removed += 1
+            except OSError:
+                continue
+            if total <= max_total_mb * 1048576:
+                break
+    return removed
+
 OUT = os.path.join(_BASE_DIR, 'analysis_overlay.png')
 GTP_COLS = 'ABCDEFGHJKLMNOPQRST'  # 围棋坐标无 I
 
@@ -104,11 +158,11 @@ def find_latest_log():
     return logs[-1]
 
 
-def find_latest_valid_log():
-    """按时间倒序找最近一个含有效搜索数据的日志."""
+def find_latest_valid_log(max_try=3):
+    """按时间倒序找最近一个含有效搜索数据的日志 (最多试最新 3 个)."""
     logs = glob.glob(os.path.join(LOG_DIR, '*.log'))
     logs.sort(key=os.path.getmtime, reverse=True)
-    for log in logs:
+    for log in logs[:max_try]:
         try:
             d = extract_last_search(log)
             if d and d['cands'] and d['root_win'] is not None:
@@ -168,17 +222,26 @@ def parse_block(block):
             'board_counts': (nb, nw)}
 
 
-def extract_last_search(logpath):
-    """解析日志中最近一次完整搜索."""
-    with open(logpath, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-    blocks = content.split('Time taken:')
-    if len(blocks) < 2:
-        return None
-    for b in reversed(blocks[1:]):
-        d = parse_block('Time taken:' + b)
-        if d['cands']:
-            return d
+def extract_last_search(logpath, tail_bytes=None):
+    """解析日志中最近一次完整搜索.
+
+    只读文件尾部 (内存恒定, 不随日志大小增长); 尾部不足以覆盖最后一块搜索时,
+    自动放大到 TAIL_SIZES 的下一档重试, 不做全量读取."""
+    sizes = (tail_bytes,) if tail_bytes else TAIL_SIZES
+    for sz in sizes:
+        try:
+            content = read_tail_text(logpath, sz)
+        except OSError:
+            return None
+        if 'Time taken:' not in content:
+            continue
+        blocks = content.split('Time taken:')
+        if len(blocks) < 2:
+            continue
+        for b in reversed(blocks[1:]):
+            d = parse_block('Time taken:' + b)
+            if d['cands']:
+                return d
     return None
 
 
