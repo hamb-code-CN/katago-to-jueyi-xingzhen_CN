@@ -2,6 +2,8 @@
 
 > **中文版说明见 [README.zh-CN.md](README.zh-CN.md)**
 
+> ⚠️ **For Go AI technical research and local testing ONLY. Any automated play, playing on someone's behalf, unattended botting, rank boosting or score farming on online Go platforms is strictly prohibited** — see [Disclaimer & Acceptable Use](#-disclaimer--acceptable-use) below.
+
 A **fully vision-driven Go (Weiqi/Baduk) auto-playing robot**. It reads **no internal game data**, injects **no processes**, and calls **no private APIs** — everything is done by *watching the screen*:
 
 ```
@@ -14,6 +16,41 @@ Because of that, it works with **any Go client that can display a board**. Curre
 |---|---|---|
 | Tencent Weiqi (腾讯围棋) | Windows native client | Red-seal OCR ("Black/White to move") |
 | Xingzhen Weiqi (星阵围棋, 19x19.com / Galaxy) | Edge/Chrome web page | Avatar water-drop HSV detection (<10ms, no OCR) |
+
+---
+
+## ⚠️ Disclaimer & Acceptable Use
+
+This project (`katago-to-jueyi-xingzhen_CN`) is provided **for Go AI technical research, study and local testing only**.
+
+### Prohibited uses
+
+You must NOT use this project for:
+
+- automated play, playing on someone else's behalf, unattended/bot play, rank boosting, score farming or cheating on any online Go platform or matchmaking app;
+- any competitive setting — official or unofficial tournaments, dan/kyu ranking matches, ranked ladders, championships;
+- evading platform anti-cheat detection, disguising automated play as human, or fabricating game records;
+- any other purpose that violates laws, platform terms of service, tournament rules or public decency.
+
+### Risk disclosure
+
+This tool can capture the screen, recognize the board, call KataGo for decisions, simulate clicks and use human-like thinking time — it **can objectively be abused for cheating in online games**. Users should be aware that:
+
+- online platforms generally prohibit AI assistance or automated play; violations may lead to **account bans, voided results, permanent restrictions**;
+- using AI in official competitions may breach professional discipline and lead to **suspension, revoked rank, voided results**;
+- in serious cases, it may entail **legal liability**.
+
+### Liability
+
+Users bear **sole responsibility** for all consequences of using, modifying, distributing or abusing this project, including but not limited to account bans, tournament sanctions, professional penalties, civil damages and criminal liability. The developers, contributors and distributors **accept no liability for any misuse or any loss arising from it**.
+
+### Technology neutrality
+
+This project is open-sourced for technical research only and **does not constitute authorization, encouragement or support for any cheating, rule-breaking or unlawful use**. Technology neutrality is not a waiver of responsibility: users may not rely on "learning purposes only" to circumvent platform rules or legal obligations.
+
+**If you do not agree to these restrictions, stop using, copying, modifying or distributing this project immediately.**
+
+This notice does not replace the liability terms in [LICENSE](LICENSE). Where this notice conflicts with applicable laws, platform rules or tournament rules, those shall prevail.
 
 ---
 
@@ -201,6 +238,12 @@ Full architecture & data flow: see `go_ai/GO_AI_ARCHITECTURE.md`
 ---
 
 ## Changelog
+
+### v1.0.1 (2026-09-11)
+
+- **Fix**: clicking "Start KataGo preload" several times during cold start used to spawn **multiple engines** (200MB+ VRAM each, and on Windows they could double-bind the same port so requests landed on a random engine). A PID-based exclusive lock now claims the startup right at second 0, the socket is bound exclusively, and the dashboard gate shows "cold start" without offering the button again
+- Preload log is now appended instead of truncated (truncation wiped the in-flight cold-start progress)
+- **Docs**: added a "Disclaimer & Acceptable Use" section
 
 ### v1.0.0 (2026-09-06)
 
