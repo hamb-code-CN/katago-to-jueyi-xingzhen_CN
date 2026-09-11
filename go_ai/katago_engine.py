@@ -100,11 +100,26 @@ class KataGoEngine:
     def _wait_ready(self, timeout=180.0):
         """读 stderr 直到出现 'GTP ready', 超时则抛错 (Windows 兼容: 线程读)"""
         import queue
-        q = queue.Queue()
+        # 有上限: 启动后就绪后不再有消费者, 无上限会让 stderr 输出持续堆积
+        q = queue.Queue(maxsize=200)
+
+        def _push(line):
+            try:
+                q.put_nowait(line)
+            except queue.Full:          # 满了丢最旧的一行
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(line)
+                except queue.Full:
+                    pass
+
         def _reader():
             try:
                 for line in self.proc.stderr:
-                    q.put(line)
+                    _push(line)
             except Exception:
                 pass
         rt = threading.Thread(target=_reader, daemon=True)

@@ -328,6 +328,9 @@ def api_kata_progress():
     }
 
 
+_START_SEQ = [0]     # 启动序号: 新的启动或停止都会递增, 使在途启动作废
+
+
 def api_start(body):
     """启动 AI controller (执黑/执白). 已运行则拒绝."""
     color = body.get('color', 'black')
@@ -343,10 +346,33 @@ def api_start(body):
     if cfg['tmin'] > cfg['tmax']:
         cfg['tmin'], cfg['tmax'] = cfg['tmax'], cfg['tmin']
     save_config(cfg)
-    ok = start_ai(color, cfg, cfg['watch'])
+    if is_running()[0]:
+        return {'ok': False, 'msg': 'controller 已在运行, 请先停止', 'config': cfg}
+
+    _START_SEQ[0] += 1
+    token = _START_SEQ[0]
+
+    def _bg():
+        try:
+            start_ai(color, cfg, cfg['watch'])
+        except Exception as e:
+            print('ERR start_ai:', repr(e), flush=True)
+            return
+        if token != _START_SEQ[0]:
+            # 启动过程中用户点了停止/重新启动 -> 撤销本次启动, 避免留下孤儿 controller
+            try:
+                n = kill_matching('go_controller')
+                print(f'[start] 启动期间收到停止指令, 已撤销本次启动 (杀掉 {n} 个 controller)',
+                      flush=True)
+            except Exception:
+                pass
+
+    # 后台启动: start_ai 内部可能同步等 KataGo 冷启动(最长 180s), 不能阻塞 HTTP 请求
+    threading.Thread(target=_bg, daemon=True).start()
     return {
-        'ok': ok,
-        'msg': '已启动' if ok else 'controller 已在运行, 请先停止',
+        'ok': True,
+        'starting': True,
+        'msg': f'AI 启动中 ({"执黑" if color == "black" else "执白"}), 详见 controller_launcher.log',
         'config': cfg,
     }
 
@@ -369,6 +395,7 @@ def api_platform(body):
 def api_stop(body):
     """停止 AI / KataGo 预加载. 看板自身永不自杀 (关浏览器即可不再查看)."""
     what = body.get('what', 'all')
+    _START_SEQ[0] += 1          # 作废在途的异步启动, 防止停掉之后又被拉起来
     n_ai = kill_matching('go_controller') if what in ('all', 'ai') else 0
     n_ka = _stop_preload() if what in ('all', 'katago') else 0
     color_cn = '黑' if load_config().get('color', 'black') == 'black' else '白'
@@ -380,11 +407,24 @@ def api_stop(body):
 
 
 def api_preload(body):
+    """启动 KataGo 预加载. 立即返回, 实际启动在后台线程 (冷启动最长 180s).
+
+    原来在请求线程里同步等待整个冷启动, 浏览器请求会挂住数分钟,
+    用户以为按钮没反应 -> 反复点击. 进度改由 /api/kata_progress 查询."""
     cfg = load_config()
-    ok = start_preload(max(cfg.get('tmin', 5.0), cfg.get('tmax', 10.0)))
+    mt = max(cfg.get('tmin', 5.0), cfg.get('tmax', 10.0))
+
+    def _bg():
+        try:
+            start_preload(mt)
+        except Exception as e:
+            print('ERR preload:', repr(e), flush=True)
+
+    threading.Thread(target=_bg, daemon=True).start()
     return {
-        'ok': ok,
-        'msg': 'KataGo 预加载就绪 ✓' if ok else 'KataGo 启动失败, 查看 kata_service.log',
+        'ok': True,
+        'starting': True,
+        'msg': 'KataGo 预加载已启动 (后台冷启动中), 进度见 /api/kata_progress',
     }
 
 

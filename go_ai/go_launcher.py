@@ -117,10 +117,19 @@ def save_config(cfg):
 
 
 # ---------- 进程管理 ----------
-_wmic_cache = {'t': 0, 'data': None}  # TTL 缓存: PowerShell 查询慢 (4s+), 避免每次 HTTP 都查
+_wmic_cache = {'t': 0, 'data': None}  # TTL 缓存: 进程查询慢 (4s+), 避免每次 HTTP 都查
 
 
-def _wmic_list(cache_ttl=4.0):
+def _invalidate_proc_cache():
+    """进程集合发生变化(启动/杀进程)后立即失效缓存.
+
+    否则启停判断会用到过期快照: 停止后立刻启动会误报"已在运行";
+    启动后立刻停止会停不掉(新进程不在快照里), AI 会继续下棋."""
+    _wmic_cache['t'] = 0
+    _wmic_cache['data'] = None
+
+
+def _wmic_list(cache_ttl=1.5):
     """返回 [(pid, cmdline), ...] 所有 python 进程.
     用 PowerShell CIM 查询 (wmic 在此环境输出混乱/有延迟, 会导致重复启动误判).
     带 TTL 缓存, 4s 内复用结果, 避免 HTTP API 每次卡 10s."""
@@ -183,6 +192,8 @@ def kill_matching(keyword):
             subprocess.run(['taskkill', '/F', '/PID', str(pid)],
                            capture_output=True, timeout=10)
             killed += 1
+    if killed:
+        _invalidate_proc_cache()
     return killed
 
 
@@ -215,6 +226,8 @@ def _stop_preload():
         for pid in pids:
             subprocess.run(['taskkill', '/F', '/PID', str(pid)],
                            capture_output=True, timeout=10)
+        if pids:
+            _invalidate_proc_cache()
         return len(pids)
     except Exception:
         return 0
@@ -263,6 +276,7 @@ def start_preload(max_time):
                  '--max-time', str(max_time)],
                 cwd=BASE, stdout=f, stderr=subprocess.STDOUT,
                 creationflags=CREATE_NO_WINDOW)
+        _invalidate_proc_cache()
         _LAST_SPAWN[0] = time.time()
     # 轮询等待就绪 (最多 180s)
     for i in range(60):
@@ -291,9 +305,11 @@ def start_ai(color, cfg, with_watch):
             '--tmin', str(tmin), '--tmax', str(tmax),
             '--interval', str(interval),
             '--platform', cfg.get('platform', 'tencent')]
-    logf = open(LOG_FILE, 'w', encoding='utf-8')
-    subprocess.Popen(args, cwd=BASE, stdout=logf, stderr=subprocess.STDOUT,
-                     creationflags=CREATE_NO_WINDOW)
+    with open(LOG_FILE, 'w', encoding='utf-8') as logf:
+        subprocess.Popen(args, cwd=BASE, stdout=logf, stderr=subprocess.STDOUT,
+                         creationflags=CREATE_NO_WINDOW)
+    # 子进程已继承句柄, 父进程这份必须关闭, 否则每次启动都泄漏一个文件句柄
+    _invalidate_proc_cache()          # 新 controller 立即对后续 status 可见
     print(f'[AI] 已启动: 执{"黑" if color=="black" else "白"}, 随机思考 {tmin:g}~{tmax:g}s, 轮询 {interval:g}s')
     print(f'     连接预加载服务后直接下棋, 无冷启动延迟; 日志: {LOG_FILE}')
     if with_watch:
