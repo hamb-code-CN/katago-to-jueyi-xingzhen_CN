@@ -239,6 +239,16 @@ Full architecture & data flow: see `go_ai/GO_AI_ARCHITECTURE.md`
 
 ## Changelog
 
+### v1.0.2 (2026-09-11)
+
+- **Fix (major)**: memory kept growing during long sessions — the dashboard read the **entire** KataGo log into memory every 2 seconds, while that log grows with every move (hundreds of MB are possible), so memory only ever went up. The dashboard now reads only the **tail** (256KB cap), making memory independent of log size: measured **+2MB** for a 202MB log (vs **+165MB** for a 73MB log before). Whole stack now sits at roughly **330MB** resident
+- Added gtp log rotation (newest 6 kept, 256MB directory cap), pruned at startup and periodically
+- **Fix**: "Start KataGo preload / play as black" blocked the HTTP request for the whole cold start (up to 180s), so the button looked dead; now it runs in the background and returns immediately
+- **Fix**: a controller could be re-spawned by the background start thread after you pressed stop (orphan process); and a stale process snapshot could make "stop" miss a just-started controller (the AI would keep playing). Both fixed
+- Memory tuning: KataGo NN cache halved (`nnCacheSizePowerOfTwo = 19`), search threads 16 → 8, daemon-thread HTTP server
+- Misc: bounded engine stderr queue, fixed a launcher log-handle leak
+- Bonus: dashboard polling latency dropped from 214s to 9s
+
 ### v1.0.1 (2026-09-11)
 
 - **Fix**: clicking "Start KataGo preload" several times during cold start used to spawn **multiple engines** (200MB+ VRAM each, and on Windows they could double-bind the same port so requests landed on a random engine). A PID-based exclusive lock now claims the startup right at second 0, the socket is bound exclusively, and the dashboard gate shows "cold start" without offering the button again
