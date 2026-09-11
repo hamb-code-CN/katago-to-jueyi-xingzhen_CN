@@ -567,7 +567,8 @@ function gatePoll(){
     }
     var st = $('gate-state'), fill = $('gate-fill'), sub = $('gate-sub'), lg = $('gate-log');
     var step = d.tuning && d.tuning.step, total = d.tuning && d.tuning.total;
-    var spinning = (d.cold_start || step != null);
+    var starting = !!(d.preload && d.preload.starting);
+    var spinning = (d.cold_start || starting || step != null);
     var spin = $('gate-spin');
     if (spin){ spin.style.display = spinning ? '' : 'none'; }
     if (spin && !spinning){ spin.style.animation = 'none'; }
@@ -576,7 +577,7 @@ function gatePoll(){
       fill.style.width = pct + '%';
       st.textContent = 'OpenCL 调优中…  ' + step + ' / ' + total + '  (' + pct + '%)';
       sub.textContent = '调优完成后自动进入看板（首次约 1-4 分钟，之后有缓存只需几秒）';
-    } else if (d.cold_start){
+    } else if (d.cold_start || starting){
       fill.style.width = '100%';
       fill.style.background = 'linear-gradient(90deg,#3b82f6,#60a5fa)';
       st.textContent = 'KataGo 冷启动中…（加载模型/初始化 OpenCL）';

@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import argparse
+import atexit
 
 # 复用 KataGo 引擎封装
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,60 +95,174 @@ def _port_in_use(port):
         s.close()
 
 
-def serve(port, max_time):
+# ---------------- 启动权独占 (防止冷启动期间重复拉起引擎) ----------------
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_kata_service.lock')
+LOCK_TTL = 600.0   # 锁最长有效期(秒): 超过视为异常残留
+
+
+def _pid_alive(pid):
+    """判断进程是否存活 (不用 os.kill: Windows 下会误杀)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            k = ctypes.windll.kernel32
+            h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return False
+            code = wintypes.DWORD()
+            ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+            k.CloseHandle(h)
+            return bool(ok) and code.value == STILL_ACTIVE
+        except Exception:
+            return True   # 保守: 判不准时视为存活, 避免重复拉起
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def read_lock_info():
+    """读取锁文件内容 (dict) 或 None."""
+    try:
+        with open(LOCK_PATH, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def service_state(port=None):
+    """KataGo 常驻服务状态:
+    'ready'    端口已在监听 (引擎就绪)
+    'starting' 已有实例认领启动权, 正在冷启动
+    'idle'     无人启动
+    """
+    port = DEFAULT_PORT if port is None else port
+    if _port_in_use(port):
+        return 'ready'
+    d = read_lock_info()
+    if d:
+        fresh = (time.time() - float(d.get('ts') or 0)) < LOCK_TTL
+        if _pid_alive(d.get('pid')) and fresh:
+            return 'starting'
+        try:                      # 陈旧锁 (进程已死/超时) -> 清理
+            os.remove(LOCK_PATH)
+        except OSError:
+            pass
+    return 'idle'
+
+
+def _claim(port):
+    """认领启动权. True=归本实例; False=已有实例(运行中或冷启动中), 本实例应退出."""
     if _port_in_use(port):
         print(f'[kata-service] 端口 {port} 已有 KataGo 服务在运行, 本实例退出 (不重复拉起引擎)',
               flush=True)
-        return 0
-    svc = KataService(port, max_time)
-    # 启动引擎 (冷加载一次)
-    try:
-        svc.start_engine()
-    except Exception as e:
-        print(f'[kata-service] KataGo 启动失败: {e}', flush=True)
-        svc.engine = None
-        return 1
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(('127.0.0.1', port))
-    srv.listen(5)
-    print(f'[kata-service] 监听 127.0.0.1:{port}', flush=True)
-
-    def client_loop(conn):
-        f = conn.makefile('rwb', buffering=0)
+        return False
+    for attempt in range(2):
         try:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                try:
-                    req = json.loads(line.decode('utf-8').strip())
-                except Exception:
-                    f.write(b'{"ok":false,"err":"bad_json"}\n')
-                    continue
-                resp = svc.handle(req)
-                f.write((json.dumps(resp) + '\n').encode('utf-8'))
-                if resp.get('stopping'):
-                    break
-        except Exception:
-            pass
-        finally:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                conn.close()
+                os.write(fd, json.dumps({'pid': os.getpid(), 'port': port,
+                                         'ts': time.time()}).encode())
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            d = read_lock_info() or {}
+            if _pid_alive(d.get('pid')) and                     (time.time() - float(d.get('ts') or 0)) < LOCK_TTL:
+                print(f'[kata-service] 另一实例 (PID {d.get("pid")}) 正在冷启动 KataGo, '
+                      f'本实例退出 (不重复拉起引擎)', flush=True)
+                return False
+            try:                  # 陈旧锁 -> 删除后重试一次
+                os.remove(LOCK_PATH)
+            except OSError:
+                return False
+    return False
+
+
+def _release_lock():
+    d = read_lock_info()
+    if d and d.get('pid') == os.getpid():
+        try:
+            os.remove(LOCK_PATH)
+        except OSError:
+            pass
+
+
+atexit.register(_release_lock)
+
+
+
+def serve(port, max_time):
+    if not _claim(port):
+        return 0
+    try:
+        svc = KataService(port, max_time)
+        # 启动引擎 (冷加载一次)
+        try:
+            svc.start_engine()
+        except Exception as e:
+            print(f'[kata-service] KataGo 启动失败: {e}', flush=True)
+            svc.engine = None
+            return 1
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Windows 下 SO_REUSEADDR 允许同一 addr:port 被两个 socket 同时绑定(双绑),
+        # 会让两个服务都"监听"同一端口、请求随机落到不同引擎; 改用独占绑定.
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', port))
+        srv.listen(5)
+        print(f'[kata-service] 监听 127.0.0.1:{port}', flush=True)
+
+        def client_loop(conn):
+            f = conn.makefile('rwb', buffering=0)
+            try:
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    try:
+                        req = json.loads(line.decode('utf-8').strip())
+                    except Exception:
+                        f.write(b'{"ok":false,"err":"bad_json"}\n')
+                        continue
+                    resp = svc.handle(req)
+                    f.write((json.dumps(resp) + '\n').encode('utf-8'))
+                    if resp.get('stopping'):
+                        break
             except Exception:
                 pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
-    while True:
-        try:
-            conn, _ = srv.accept()
-        except Exception:
-            break
-        if svc.engine is None:
-            conn.close()
-            break
-        t = threading.Thread(target=client_loop, args=(conn,), daemon=True)
-        t.start()
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except Exception:
+                break
+            if svc.engine is None:
+                conn.close()
+                break
+            t = threading.Thread(target=client_loop, args=(conn,), daemon=True)
+            t.start()
+    finally:
+        _release_lock()
 
 
 if __name__ == '__main__':

@@ -24,3 +24,4 @@ katago/opencl171/KataGoData/
 katago/*.bin.gz
 _command.json
 win_history.json
+go_ai/_kata_service.lock

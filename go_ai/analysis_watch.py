@@ -295,11 +295,22 @@ def api_kata_progress():
             break
     cold = any('冷启动 KataGo' in ln or 'Tuning ' in ln or 'KataGo 启动失败' in ln
                for ln in lines[-8:])
+    starting = False
+    try:
+        if OUT_DIR not in sys.path:
+            sys.path.insert(0, OUT_DIR)
+        from kata_service import service_state as _ss
+        _st = _ss(SERVICE_PORT)
+        starting = (_st == 'starting')
+        if _st == 'ready':
+            svc = True
+    except Exception:
+        starting = False
     return {
         'ok': True,
-        'preload': {'running': bool(svc), 'port': SERVICE_PORT},
+        'preload': {'running': bool(svc), 'starting': bool(starting), 'port': SERVICE_PORT},
         'tuning': {'step': step, 'total': total},
-        'cold_start': cold,
+        'cold_start': bool(cold or starting),
         'log_tail': lines[-18:],
     }
 

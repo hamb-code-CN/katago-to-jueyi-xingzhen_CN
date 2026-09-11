@@ -220,25 +220,59 @@ def _stop_preload():
         return 0
 
 
+def _kata_state():
+    """KataGo 常驻服务状态: 'ready' | 'starting' | 'idle'."""
+    if _listen(SERVICE_PORT):
+        return 'ready'
+    try:
+        if BASE not in sys.path:
+            sys.path.insert(0, BASE)
+        from kata_service import service_state as _ss
+        return _ss(SERVICE_PORT)
+    except Exception:
+        return 'idle'
+
+
+_LAST_SPAWN = [0.0]
+
+
 def start_preload(max_time):
-    """确保 KataGo 常驻服务在跑. 返回 True 表示已就绪(或已在跑)."""
+    """确保 KataGo 常驻服务在跑. 返回 True 表示已就绪(或已在跑).
+
+    注意: 冷启动期间端口尚未监听, 不能只靠端口判重, 否则反复点击会拉起多个引擎
+    (每个 200MB+ GPU 显存, 且会双绑同一端口) -> 用锁文件认领 + 刚刚发起标记双重保护.
+    """
     if _listen(SERVICE_PORT):
         print(f'[预加载] KataGo 服务已在运行 (端口 {SERVICE_PORT}), 复用免冷启动 ✓')
         return True
-    print('[预加载] KataGo 服务未运行, 冷启动中 (仅首次 60-90s, 之后常驻)...')
-    with open(KATA_LOG, 'w', encoding='utf-8') as f:
-        subprocess.Popen(
-            [PY, '-u', 'kata_service.py', '--port', str(SERVICE_PORT),
-             '--max-time', str(max_time)],
-            cwd=BASE, stdout=f, stderr=subprocess.STDOUT,
-            creationflags=CREATE_NO_WINDOW)
+    state = _kata_state()
+    if state == 'starting':
+        print('[预加载] 检测到另一实例正在冷启动 KataGo, 等待其就绪 (不重复拉起引擎)...')
+    elif time.time() - _LAST_SPAWN[0] < 120:
+        print('[预加载] 刚刚已发起启动, 继续等待就绪 (不重复拉起引擎)...')
+    else:
+        print('[预加载] KataGo 服务未运行, 冷启动中 (仅首次 60-90s, 之后常驻)...')
+        # 追加模式: 避免清空正在冷启动实例的日志 (曾用 'w' 截断导致进度丢失); 过大时才滚动
+        try:
+            big = os.path.getsize(KATA_LOG) > 300000
+        except OSError:
+            big = True
+        with open(KATA_LOG, 'w' if big else 'a', encoding='utf-8') as f:
+            subprocess.Popen(
+                [PY, '-u', 'kata_service.py', '--port', str(SERVICE_PORT),
+                 '--max-time', str(max_time)],
+                cwd=BASE, stdout=f, stderr=subprocess.STDOUT,
+                creationflags=CREATE_NO_WINDOW)
+        _LAST_SPAWN[0] = time.time()
     # 轮询等待就绪 (最多 180s)
     for i in range(60):
         time.sleep(3)
         if _listen(SERVICE_PORT):
             print(f'[预加载] KataGo 服务就绪 (等待 {(i+1)*3}s) ✓')
+            _LAST_SPAWN[0] = 0.0
             return True
     print('[预加载] KataGo 服务启动超时, 请检查 kata_service.log')
+    _LAST_SPAWN[0] = 0.0
     return False
 
 
