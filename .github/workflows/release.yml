@@ -59,26 +59,15 @@ jobs:
         shell: pwsh
         run: python tools/make_release.py --version ${{ steps.ver.outputs.version }} --out dist --with-model
 
-      - name: 生成 Release 说明
+      - name: 生成 Release 说明 (取自 README 更新日志)
         shell: pwsh
+        # 直接复用 README 的更新日志, 让发版说明与仓库文档永远一致
+        # (以前正文是这里写死的一段通用模板, 每次发版都看不出这版改了什么)。
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          $body = @"
-          ## GoAI Auto-Player $v
-
-          自动构建产物 (CI 打包, 已通过回归测试)。
-
-          | 文件 | 说明 |
-          | --- | --- |
-          | ``*-$v.zip`` | 核心包: 代码 + KataGo 引擎, 不含网络权重 |
-          | ``*-$v-full.zip`` | 完整便携包: 额外含 ``katago/*.bin.gz`` 权重, 解压即用 |
-
-          各 zip 同目录下的 ``.sha256`` 为校验值, 可用 ``certutil -hashfile <zip> SHA256`` 比对。
-
-          模型获取方式见 README「模型下载与加载」。
-          "@
-          $body | Out-File -FilePath RELEASE_BODY.md -Encoding utf8
           Get-ChildItem dist | Format-Table Name, Length
+          python tools/release_notes.py --version $v --out RELEASE_BODY.md
+          Get-Content RELEASE_BODY.md -TotalCount 12
 
       - name: 创建 Release 并上传资产
         shell: pwsh

@@ -745,7 +745,7 @@ test_ko_integration/test_setboard/test_setboard2`）—— 它们会被 `unittes
    决策合法性校验里把"已被拉黑的点"视同非法，于是引擎会改下候选列表里的下一个点；
    任何一手核对成功说明链路恢复，立即清空黑名单。`reset`/`set_color` 也清空。
 
-**回归用例新增 12 例（总数 114）**：`tests/test_vision.py::TestLastMoveMarker` 6 例
+**回归用例新增 12 例（总数 121）**：`tests/test_vision.py::TestLastMoveMarker` 6 例
 （红标掩码只命中红、带标记的白子/黑子仍读对、计数不变、只有红标的空点仍是空点）、
 `tests/test_assist_mode.py::TestPlayFailBlacklist` 5 例。实测修复后连续 7 手全部
 `核对 … OK`（此前 0 成功）。

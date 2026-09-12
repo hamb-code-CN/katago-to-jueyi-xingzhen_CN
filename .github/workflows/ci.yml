@@ -26,7 +26,12 @@ jobs:
           pip install numpy==2.2.6 opencv-python==5.0.0.93 pyautogui==0.9.54
 
       - name: 语法检查 (全部模块)
-        run: python -m py_compile go_ai/*.py tools/*.py
+        shell: bash
+        # 注意: 必须用 bash —— pwsh 不展开通配符, 旧写法 `python -m py_compile go_ai/*.py`
+        # 会把字面量 'go_ai/*.py' 当文件名传进去, 直接 errno 22 中断发版。
+        run: |
+          python -m compileall -q go_ai tools
+          echo "语法检查通过"
 
       - name: 运行回归测试
         run: python -m unittest discover -s go_ai/tests -v

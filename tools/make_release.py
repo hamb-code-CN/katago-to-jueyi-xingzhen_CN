@@ -21,6 +21,14 @@ import argparse
 import subprocess
 import zipfile
 
+# CI runner (windows-latest + pwsh) 的 stdout 默认编码是 cp1252, 打印中文会直接
+# UnicodeEncodeError 把整个 job 打断 (v1.0.3 首次发版就死在这里)。这里强制 UTF-8。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_GLOB = '.bin.gz'
 SKIP_DIRS = {'.git', 'venv', '.venv', '__pycache__', 'dist', '.idea', '.github'}

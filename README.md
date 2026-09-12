@@ -83,7 +83,7 @@ This notice does not replace the liability terms in [LICENSE](LICENSE). Where th
 -  **Single source of truth for config** (v1.0.3): everything lives in `go_ai/settings.json`; CLI > config file > built-in defaults
 -  **Assist mode: AI plays nothing, you pick the move** (v1.0.3): choose **Assist** as the "move mode" in the dashboard and the AI only reports win-rate + candidate moves. You decide where to play — **click an intersection on the board**, or **click a candidate row** — and it clicks that move for you in the client. Your picks go through the same legality check (occupied / ko / suicide / forbidden), so bad clicks are rejected with a reason instead of scrambling the client. A separate **Analyze-only** mode just watches and never plays
 -  **Single-instance protection** (v1.0.3): only one AI may own the board per machine, plus a fix for a watchdog "zombie storm" that used to spawn a new AI every 30 s when process enumeration failed
--  **Regression tests** (v1.0.3): 114 cases (rules/ko/vision/config/SGF/end-game/singleton-lock/assist-mode/loop smoke), one command, run automatically in CI
+-  **Regression tests** (v1.0.3): 121 cases (rules/ko/vision/config/SGF/end-game/singleton-lock/assist-mode/loop smoke), one command, run automatically in CI
 
 ---
 
@@ -307,17 +307,22 @@ Full architecture & data flow: see `go_ai/GO_AI_ARCHITECTURE.md`
 
 **Engineering**
 
-- **Regression tests**: 114 cases (rules/capture/ko/suicide, SGF, config validation, notifications, end-game state machine, synthetic-board recognition, singleton lock, assist mode, controller loop smoke), stdlib `unittest`, no extra dependencies:
+- **Regression tests**: 121 cases (rules/capture/ko/suicide, SGF, config validation, notifications, end-game state machine, synthetic-board recognition, singleton lock, assist mode, controller loop smoke), stdlib `unittest`, no extra dependencies:
   ```
   cd go_ai && python -m unittest discover -s tests -v
   ```
 - **GitHub Actions**: `ci.yml` runs syntax check + tests + packaging self-check on every push; `release.yml` releases on tag push (tests → build → SHA256 → GitHub Release).
 - **Scripted packaging**: `python tools/make_release.py [--with-model]` — only git-tracked files, so venvs, debug logs and caches no longer leak into the zip.
+- **Auto-generated release notes**: `python tools/release_notes.py --version v1.0.3` extracts the matching section **from this README's changelog** (both languages), so release notes and docs can never drift apart.
 - **Pinned dependencies**: exact versions in `requirements.txt`, with `requirements-flexible.txt` for new machines.
 - **Cleanup**: dead code in `go_engine`, unused imports in `go_controller`.
 
 **Fixes**
 
+- **Two hard failures in the release pipeline (the first v1.0.3 release died on both)**:
+  - The syntax-check step ran `python -m py_compile go_ai/*.py`, but CI's default shell is pwsh, which does **not** expand globs — the literal `go_ai/*.py` was passed as a filename, aborting with `[Errno 22] Invalid argument`. Now uses `python -m compileall -q go_ai tools` under `bash`.
+  - The packaging script printed Chinese (`打包完成: …`) to the runner's **cp1252** console, raising `UnicodeEncodeError` and failing the job. The script now forces UTF-8 on `stdout`/`stderr` at startup.
+  (Both only bite on GitHub's Windows runners — a local UTF-8 console is perfectly happy, hence "all green locally, all red in CI".)
 - **The "last move" red mark read as an empty point → infinite loop (major)**: some clients draw a vermilion square on the last move. It covers the stone centre, tinting the sampled patch red (white-stone saturation rises from 0.10 to 0.35), so the stone was classified as an **empty point**. The engine then treated that point as the best available move and clicked an occupied intersection over and over — the client rejected it, the stone count never changed, and the next cycle read the same "empty" point. In a real run this spun for 115 cycles without a single successful move.
   - Root-cause fix: **discard vermilion marker pixels before counting** (`go_vision.marker_red_mask`), falling back to the plain patch when too much would be removed. The point now reads as a white stone and the counts are correct.
   - Safety net: after **2 consecutive failed move verifications** at the same intersection it is blacklisted and the engine's next candidate is used instead, so the same point is never retried forever. Any successful verification clears the blacklist.
