@@ -1,0 +1,8 @@
+# 宽松版本范围 (不锁死): 用于在新机器/新 Python 上搭建环境。
+# 装完后请运行: python -m unittest discover -s go_ai/tests
+# 测试通过后可用 pip freeze 重新生成 requirements.txt 的精确锁定版本。
+opencv-python>=4.8,<6
+numpy>=1.24,<3
+pillow>=10.0
+pyautogui>=0.9.54
+rapidocr-onnxruntime>=1.3

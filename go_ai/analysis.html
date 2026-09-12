@@ -4,99 +4,173 @@
 <meta charset="utf-8">
 <title>KataGo 实时分析</title>
 <style>
-:root{--bg:#14171c;--panel:#1d222a;--panel2:#181d24;--border:#2c333d;--text:#e8eaed;--muted:#8b94a3;--gold:#f0b90b;--black:#39424e;--white:#e8e8e8;}
+:root{
+  /* 白 + 米色主题 (宣纸/棋谱质感) */
+  --bg:#f7f4ee;            /* 米白底 */
+  --panel:#ffffff;         /* 纯白面板 */
+  --panel2:#fdfcf9;        /* 近白 (卡内嵌块) */
+  --beige:#f2ebdd;         /* 米色填充 */
+  --beige2:#e4d9c4;        /* 米色描边 */
+  --border:#ece5d8;        /* 柔和暖边框 */
+  --text:#332f28;          /* 暖黑文字 */
+  --muted:#8d8577;         /* 次要文字 */
+  --dim:#a4977f;           /* 更淡的说明文字 */
+  --gold:#c08a1e;          /* 木色/琥珀 强调 */
+  --gold-deep:#8a5f16;
+  --black:#3a3630;         /* 黑棋 */
+  --ok:#2f9e63; --warn:#c98a1a; --danger:#c9483f;
+  --shadow:0 1px 2px rgba(120,96,60,.05),0 10px 26px rgba(120,96,60,.06);
+  --topbar-h:52px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",sans-serif;height:100vh;overflow:hidden}
-.topbar{display:flex;align-items:center;gap:14px;padding:9px 18px;background:var(--panel);border-bottom:1px solid var(--border)}
-.topbar h1{font-size:15px;font-weight:500;letter-spacing:.5px}
-.topbar .tag{font-size:11px;color:#9fe1cb;background:rgba(29,158,117,.15);border:1px solid rgba(29,158,117,.4);padding:2px 8px;border-radius:10px}
+body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased;
+  font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#e2d9c9;border-radius:9px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:#d3c7b0;background-clip:content-box}
+
+/* ===== 顶栏 ===== */
+.topbar{position:relative;display:flex;align-items:center;gap:14px;height:var(--topbar-h);padding:0 22px;
+  background:var(--panel);border-bottom:1px solid var(--border);box-shadow:0 1px 0 rgba(120,96,60,.03)}
+.topbar:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;
+  background:linear-gradient(90deg,#c08a1e,#e6c47e 42%,#efe3cb 72%,#c08a1e)}
+.topbar h1{font-size:16px;font-weight:600;letter-spacing:1.5px;color:#2b2822;
+  font-family:"Songti SC","SimSun","Noto Serif SC",serif;display:flex;align-items:center}
+.topbar h1:before{content:"";width:11px;height:11px;border-radius:3px;margin-right:9px;
+  background:linear-gradient(135deg,#d8a94a,#8a5f16);box-shadow:0 1px 2px rgba(138,95,22,.35)}
+.topbar .tag{font-size:11px;color:#7a6a3f;background:linear-gradient(180deg,#fcf4e4,#f5ead2);
+  border:1px solid var(--beige2);padding:3px 10px;border-radius:999px}
 .topbar .st{font-size:12px;color:var(--muted)}
-.topbar .sp{margin-left:auto;font-size:12px;color:var(--muted)}
+.topbar .sp{margin-left:auto;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
 .topbar .sp+button{margin-left:12px}
-.main{display:flex;height:calc(100vh - 42px)}
-.board-wrap{flex:1;display:flex;align-items:center;justify-content:center;background:var(--bg);min-width:0;padding:8px}
-.board-wrap img{width:100%;height:100%;object-fit:contain;border-radius:6px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
-.sidebar{width:280px;background:var(--panel);border-left:1px solid var(--border);overflow-y:auto;padding:12px;flex-shrink:0}
-.card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px}
-.winhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.main{display:flex;height:calc(100vh - var(--topbar-h))}
+.board-wrap{position:relative;flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:18px;
+  background:radial-gradient(125% 125% at 50% 0%,#fdfbf7 0%,#f5f0e6 58%,#efe8da 100%)}
+.board-wrap img{width:100%;height:100%;object-fit:contain;border-radius:12px;background:#fff;
+  border:1px solid rgba(200,180,140,.35);
+  box-shadow:0 12px 34px rgba(122,98,60,.16),0 2px 6px rgba(122,98,60,.10)}
+/* 两种棋盘视图: digital=前端绘制, photo=实拍截图 */
+.board-stage{display:none;width:100%;height:100%;align-items:center;justify-content:center}
+.board-stage.on{display:flex}
+#boardCanvas{max-width:100%;max-height:100%;border-radius:12px;
+  box-shadow:0 12px 34px rgba(122,98,60,.20),0 2px 6px rgba(122,98,60,.12)}
+.board-hint{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);font-size:11px;
+  color:var(--dim);background:rgba(255,255,255,.82);border:1px solid var(--border);
+  padding:3px 10px;border-radius:999px;pointer-events:none}
+/* 辅助模式: 棋盘可点选落子 */
+#boardCanvas.pickable{cursor:crosshair}
+.pick-badge{position:absolute;top:16px;left:50%;transform:translateX(-50%);font-size:12px;
+  color:#fff;background:linear-gradient(180deg,#c08a1e,#a9770f);border:1px solid rgba(150,105,10,.5);
+  padding:4px 12px;border-radius:999px;pointer-events:none;display:none;
+  box-shadow:0 4px 12px rgba(160,120,30,.28)}
+.pick-badge.on{display:block}
+/* 视图切换 */
+.view-tabs{display:flex;background:var(--beige);border:1px solid var(--beige2);border-radius:999px;padding:2px}
+.view-tabs button{border:none;background:transparent;color:#8d8577;font-size:11px;font-family:inherit;
+  padding:4px 11px;border-radius:999px;cursor:pointer;transition:all .16s}
+.view-tabs button.on{background:#fff;color:var(--gold-deep);font-weight:600;
+  box-shadow:0 1px 3px rgba(120,96,60,.14)}
+.sidebar{width:302px;background:#fbf8f2;border-left:1px solid var(--border);overflow-y:auto;padding:14px;flex-shrink:0}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:12px;box-shadow:var(--shadow)}
+.winhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
 .winhead .side{font-size:12px;color:var(--muted)}
-.winhead .num{font-size:22px;font-weight:500;font-variant-numeric:tabular-nums}
-.bar{flex:1;height:12px;background:#333a44;border-radius:6px;overflow:hidden;display:flex}
-.bar .b{background:#47545f;height:100%}
-.bar .w{background:#e0e0e0;height:100%}
+.winhead .num{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;color:#2b2822;letter-spacing:.5px}
+.bar{flex:1;height:12px;background:var(--beige);border-radius:999px;overflow:hidden;display:flex;
+  box-shadow:inset 0 1px 2px rgba(120,96,60,.08)}
+.bar .b{background:linear-gradient(180deg,#4d473e,#302c26);height:100%}
+.bar .w{background:#fff;height:100%;box-shadow:inset 1px 0 0 rgba(200,186,158,.6)}
 .winrow{display:flex;align-items:center;gap:10px}
-.winrow .tagb{width:28px;font-size:13px;color:#9fb4c8;font-weight:500}
-.winrow .tagw{width:28px;font-size:13px;color:#d8d8d8;font-weight:500;text-align:right}
-.legend{display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--muted)}
-.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
-.clist-title{font-size:12px;color:var(--muted);margin:14px 2px 8px;display:flex;justify-content:space-between}
-.cand{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;border:1px solid var(--border);margin-bottom:5px;background:var(--panel2);transition:border-color .2s}
-.cand.best{border-color:var(--gold);background:rgba(240,185,11,.06)}
-.cand .idx{width:16px;text-align:center;font-size:12px;color:var(--muted)}
-.cand.best .idx{color:var(--gold);font-weight:500}
+.winrow .tagb{width:28px;font-size:13px;color:#4d473e;font-weight:600}
+.winrow .tagw{width:28px;font-size:13px;color:#a99c85;font-weight:600;text-align:right}
+.legend{display:flex;gap:14px;margin-top:12px;font-size:11px;color:var(--muted);padding-top:10px;border-top:1px dashed var(--border)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.clist-title{font-size:12px;color:var(--dim);margin:16px 4px 8px;display:flex;justify-content:space-between;
+  letter-spacing:.5px;text-transform:uppercase}
+.cand{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:11px;border:1px solid var(--border);
+  margin-bottom:6px;background:var(--panel);transition:all .16s}
+.cand:hover{border-color:var(--beige2);background:#fffdf8}
+.cand.best{border-color:#e2c37a;background:linear-gradient(180deg,#fdf7ea,#faf0dc);box-shadow:0 1px 3px rgba(192,138,30,.12)}
+/* 辅助模式: 候选点可点击落子 */
+.cand.pickable{cursor:pointer}
+.cand.pickable:hover{border-color:#c08a1e;background:#fffaf0;box-shadow:0 2px 8px rgba(192,138,30,.18)}
+.cand .idx{width:16px;text-align:center;font-size:12px;color:var(--dim)}
+.cand.best .idx{color:#b5813a;font-weight:700}
 .cand .pt{width:64px;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;font-variant-numeric:tabular-nums}
-.cand .pt .cn{font-size:14px;font-weight:500;line-height:1.05}
-.cand .pt .gtp{font-size:10px;color:var(--muted);line-height:1.05;margin-top:1px}
-.cand .bar{height:8px;flex:1}
-.cand .pct{width:48px;text-align:right;font-size:12px;font-weight:500;font-variant-numeric:tabular-nums}
-.cand .sub{width:80px;text-align:right;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
-.empty{padding:40px 10px;text-align:center;color:var(--muted);font-size:13px}
-.err{color:#e24b4a}
+.cand .pt .cn{font-size:14px;font-weight:600;line-height:1.05;color:#2b2822}
+.cand .pt .gtp{font-size:10px;color:var(--dim);line-height:1.05;margin-top:1px}
+.cand .bar{height:8px;flex:1;box-shadow:inset 0 1px 2px rgba(120,96,60,.07)}
+.cand .pct{width:48px;text-align:right;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+.cand .sub{width:82px;text-align:right;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+.empty{padding:44px 10px;text-align:center;color:var(--muted);font-size:13px;line-height:1.8}
+.err{color:var(--danger)}
 
 /* ===== 网页版启动器 (整合面板) ===== */
-#launcher-btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit}
-#launcher-btn:hover{border-color:#5a6472}
-#launcher-btn.on{background:rgba(240,185,11,.12);border-color:rgba(240,185,11,.5);color:var(--gold)}
-#launcher-panel{position:fixed;top:50px;right:12px;width:300px;max-height:calc(100vh - 60px);background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;z-index:100;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5);display:none}
+#launcher-btn{background:var(--panel);border:1px solid var(--border);color:#4d473e;padding:6px 13px;
+  border-radius:999px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .16s}
+#launcher-btn:hover{border-color:var(--beige2);background:#fdfaf4}
+#launcher-btn.on{background:linear-gradient(180deg,#fdf3e0,#f7e7c9);border-color:#e2c37a;color:var(--gold-deep);font-weight:600}
+#launcher-panel{position:fixed;top:calc(var(--topbar-h) + 10px);right:14px;width:314px;
+  max-height:calc(100vh - var(--topbar-h) - 26px);background:var(--panel);border:1px solid var(--border);
+  border-radius:16px;padding:16px;z-index:100;overflow-y:auto;display:none;
+  box-shadow:0 20px 52px rgba(120,96,60,.18),0 2px 8px rgba(120,96,60,.08)}
 #launcher-panel.show{display:block}
-.la-sec{margin-bottom:14px}
-.la-sec h3{font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:500;letter-spacing:.5px;text-transform:uppercase}
+.la-sec{margin-bottom:15px;padding-bottom:13px;border-bottom:1px dashed var(--border)}
+.la-sec:last-of-type{border-bottom:none;padding-bottom:0}
+.la-sec h3{font-size:11px;color:var(--dim);margin-bottom:8px;font-weight:600;letter-spacing:1px;text-transform:uppercase}
 .la-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
 .la-row label{flex:0 0 80px;font-size:12px;color:var(--muted)}
-.la-row input{flex:1;min-width:60px;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit}
-.la-row input:focus{outline:none;border-color:var(--gold)}
-.la-select{flex:1;min-width:120px;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
-.la-select:focus{outline:none;border-color:var(--gold)}
-.la-select option{background:var(--panel2);color:var(--text)}
-.la-btn{padding:6px 10px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .15s}
-.la-btn:hover{border-color:#5a6472;background:#222831}
-.la-btn.primary{background:rgba(240,185,11,.10);border-color:rgba(240,185,11,.4);color:var(--gold)}
-.la-btn.primary:hover{background:rgba(240,185,11,.18)}
-.la-btn.danger{background:rgba(226,75,74,.10);border-color:rgba(226,75,74,.35);color:#f09595}
-.la-btn.danger:hover{background:rgba(226,75,74,.18)}
-.la-btn:disabled{opacity:.4;cursor:not-allowed}
-.la-st{font-size:11px;padding:2px 7px;border-radius:8px;font-weight:500}
-.la-st.run{color:#37d67a;background:rgba(55,214,122,.12);border:1px solid rgba(55,214,122,.3)}
-.la-st.stop{color:var(--muted);background:rgba(139,148,163,.10);border:1px solid rgba(139,148,163,.25)}
-.la-msg{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5;min-height:14px}
-.la-msg.ok{color:#9fe1cb}
-.la-msg.err{color:#f09595}
+.la-row input{flex:1;min-width:60px;background:#fdfcf9;border:1px solid var(--border);color:var(--text);
+  padding:6px 9px;border-radius:9px;font-size:12px;font-family:inherit;transition:all .16s}
+.la-row input:focus{outline:none;border-color:#e2c37a;box-shadow:0 0 0 3px rgba(192,138,30,.10)}
+.la-select{flex:1;min-width:120px;background:#fdfcf9;border:1px solid var(--border);color:var(--text);
+  padding:6px 9px;border-radius:9px;font-size:12px;font-family:inherit;cursor:pointer}
+.la-select:focus{outline:none;border-color:#e2c37a;box-shadow:0 0 0 3px rgba(192,138,30,.10)}
+.la-select option{background:#fff;color:var(--text)}
+.la-btn{padding:7px 11px;background:var(--panel);border:1px solid var(--border);color:#4d473e;
+  border-radius:9px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .16s}
+.la-btn:hover{border-color:var(--beige2);background:#fdfaf4}
+.la-btn.primary{background:linear-gradient(180deg,#fdf3e0,#f7e7c9);border-color:#e2c37a;color:var(--gold-deep);font-weight:600}
+.la-btn.primary:hover{filter:brightness(1.03)}
+.la-btn.danger{background:#fdf1ef;border-color:#f0cfca;color:#b3372f}
+.la-btn.danger:hover{background:#fbe8e5}
+.la-btn:disabled{opacity:.45;cursor:not-allowed}
+.la-st{font-size:11px;padding:3px 9px;border-radius:999px;font-weight:600}
+.la-st.run{color:#1f7a4d;background:#eaf6ef;border:1px solid #c9e6d5}
+.la-st.stop{color:var(--muted);background:#f5f2ec;border:1px solid #e7e0d3}
+.la-msg{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.6;min-height:14px}
+.la-msg.ok{color:#1f7a4d}
+.la-msg.err{color:#b3372f}
 </style>
 </head>
 <body>
 <div id="gate">
   <style>
     #gate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;
-      background:var(--bg,#14181f);font-family:inherit}
+      background:rgba(247,244,238,.92);backdrop-filter:blur(6px);font-family:inherit}
     #gate.hidden{display:none}
-    .gate-card{width:min(560px,92vw);background:var(--panel,#1c212b);border:1px solid var(--border,#333b48);
-      border-radius:14px;padding:26px 28px;box-shadow:0 12px 48px rgba(0,0,0,.45)}
-    .gate-card h2{margin:0 0 6px;font-size:18px;color:var(--text,#e8eaed)}
-    .gate-state{margin:14px 0 10px;font-size:14px;color:var(--gold,#f0b90b);min-height:20px}
-    .gate-bar{height:12px;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden}
-    .gate-bar-fill{height:100%;width:0%;border-radius:6px;
-      background:linear-gradient(90deg,#f0b90b,#ffd75e);transition:width .6s ease}
-    .gate-sub{margin-top:8px;font-size:12px;color:var(--dim,#9aa4b2);min-height:16px}
-    .gate-log{margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.3);
-      font:11px/1.6 Consolas,monospace;color:#7fd8a0;height:120px;overflow-y:auto;white-space:pre-wrap;
+    .gate-card{width:min(560px,92vw);background:#fff;border:1px solid #ece5d8;
+      border-radius:18px;padding:28px 30px;box-shadow:0 26px 64px rgba(120,96,60,.18),0 2px 8px rgba(120,96,60,.08)}
+    .gate-card h2{margin:0 0 6px;font-size:18px;color:#2b2822;letter-spacing:.5px;
+      font-family:"Songti SC","SimSun","Noto Serif SC",serif}
+    .gate-state{margin:14px 0 10px;font-size:14px;color:#b5813a;min-height:20px}
+    .gate-bar{height:12px;border-radius:999px;background:#f2ebdd;overflow:hidden;
+      box-shadow:inset 0 1px 2px rgba(120,96,60,.08)}
+    .gate-bar-fill{height:100%;width:0%;border-radius:999px;
+      background:linear-gradient(90deg,#c08a1e,#e6c47e);transition:width .6s ease}
+    .gate-sub{margin-top:8px;font-size:12px;color:#8d8577;min-height:16px}
+    .gate-log{margin-top:12px;padding:11px 13px;border-radius:10px;background:#faf7f1;
+      border:1px solid #f0e9dc;
+      font:11px/1.65 Consolas,monospace;color:#6b6252;height:120px;overflow-y:auto;white-space:pre-wrap;
       word-break:break-all}
     .gate-actions{margin-top:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-    .gate-actions button{padding:9px 22px;border-radius:8px;border:1px solid var(--border,#333b48);
-      background:linear-gradient(180deg,#f0b90b,#d9a40a);color:#14181f;font-weight:700;cursor:pointer;font-size:14px}
-    .gate-actions button:hover{filter:brightness(1.1)}
-    .gate-skip{font-size:12px;color:var(--dim,#9aa4b2);cursor:pointer;text-decoration:none;border-bottom:1px dashed #555}
-    .gate-spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(240,185,11,.3);
-      border-top-color:#f0b90b;border-radius:50%;animation:gate-rot .8s linear infinite;vertical-align:-2px;margin-right:6px}
+    .gate-actions button{padding:9px 22px;border-radius:10px;border:1px solid #c08a1e;
+      background:linear-gradient(180deg,#d8a94a,#c08a1e);color:#fff;font-weight:600;cursor:pointer;font-size:14px;
+      box-shadow:0 2px 6px rgba(192,138,30,.25)}
+    .gate-actions button:hover{filter:brightness(1.06)}
+    .gate-skip{font-size:12px;color:#8d8577;cursor:pointer;text-decoration:none;border-bottom:1px dashed #d8ccb6}
+    .gate-spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(192,138,30,.25);
+      border-top-color:#c08a1e;border-radius:50%;animation:gate-rot .8s linear infinite;vertical-align:-2px;margin-right:6px}
     @keyframes gate-rot{to{transform:rotate(360deg)}}
   </style>
   <div class="gate-card">
@@ -115,6 +189,10 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
   <h1>KataGo 实时分析</h1>
   <span class="tag">● 实时计算</span>
   <span class="st" id="st">等待数据…</span>
+  <div class="view-tabs" id="viewTabs">
+    <button id="vt-digital" class="on" onclick="setView('digital')">数字棋盘</button>
+    <button id="vt-photo" onclick="setView('photo')">实拍</button>
+  </div>
   <span class="sp" id="ts">--:--:--</span>
   <button id="launcher-btn" onclick="toggleLauncher()">⚙ 启动器</button>
 </div>
@@ -132,12 +210,38 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
   </div>
 
   <div class="la-sec">
+    <h3>取图方式（后台识别）</h3>
+    <div class="la-row">
+      <select id="cap-mode" class="la-select" onchange="saveCapture()">
+        <option value="auto">自动（优先窗口，失败回落全屏）</option>
+        <option value="window">只用窗口（可后台 / 最小化）</option>
+        <option value="screen">只用全屏截图（窗口需在前台）</option>
+      </select>
+    </div>
+    <div class="la-row">
+      <label>水平镜像</label>
+      <button class="la-btn" id="cap-mirror-btn" onclick="toggleMirror()">--</button>
+    </div>
+    <div class="la-msg" id="cap-info">--</div>
+    <div class="la-msg">「窗口」用 PrintWindow 直接读窗口内容，被遮挡或最小化也能识别，不用让棋盘一直摆在前台。数字棋盘左右反了，点「水平镜像」切换。</div>
+  </div>
+
+  <div class="la-sec">
     <h3>启动 AI controller</h3>
+    <div class="la-row">
+      <label>落子方式</label>
+      <select id="cfg-mode" class="la-select" onchange="saveMode()">
+        <option value="auto">AI 自动落子</option>
+        <option value="assist">辅助模式（AI 只分析，我点选落子）</option>
+        <option value="analyze">仅分析（AI 不出手）</option>
+      </select>
+    </div>
     <div class="la-row">
       <button class="la-btn primary" onclick="startAI('black')">⚫ 执黑启动</button>
       <button class="la-btn primary" onclick="startAI('white')">⚪ 执白启动</button>
     </div>
     <div class="la-msg">等同于 bat 一键启动中的 AI 启动步骤</div>
+    <div class="la-msg" id="mode-hint">辅助模式：AI 只给你胜率与候选，<b>点棋盘或候选点</b> 即帮你在客户端落子。</div>
   </div>
 
   <div class="la-sec">
@@ -200,12 +304,44 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
     <div class="la-row"><button class="la-btn" onclick="saveCfg()">保存参数</button></div>
   </div>
 
+  <div class="la-sec">
+    <h3>棋谱 / 终局</h3>
+    <div class="la-row">
+      <button class="la-btn" onclick="exportSGF()">导出当前棋谱 (SGF)</button>
+    </div>
+    <div class="la-msg" id="la-result">上一局: --</div>
+    <div class="la-msg">识别到终局 (引擎认输 / 连续虚着 / 盘面长时间静止) 会自动导出棋谱并停止 AI;</div>
+  </div>
+
+  <div class="la-sec">
+    <h3>事件通知 (默认关闭)</h3>
+    <div class="la-row">
+      <label>启用</label>
+      <input type="checkbox" id="nt-enable">
+    </div>
+    <div class="la-row">
+      <input type="text" id="nt-url" class="la-select" placeholder="http://... webhook 地址">
+    </div>
+    <div class="la-row">
+      <button class="la-btn" onclick="saveNotify()">保存</button>
+      <button class="la-btn" onclick="testNotify()">发测试通知</button>
+    </div>
+    <div class="la-msg">对局结束 / 引擎掉线 / 思考出错 时 POST 一条 JSON 到该地址</div>
+  </div>
+
   <div class="la-msg" id="la-msg"></div>
 </div>
 
 <div class="main">
   <div class="board-wrap">
-    <img id="board" alt="棋盘" src="analysis_overlay.png">
+    <div class="board-stage on" id="stage-digital">
+      <canvas id="boardCanvas" width="900" height="900"></canvas>
+    </div>
+    <div class="board-stage" id="stage-photo">
+      <img id="board" alt="棋盘" src="analysis_overlay.png">
+    </div>
+    <div class="board-hint" id="boardHint">数字棋盘 · 后台识别（不依赖前台截图）</div>
+    <div class="pick-badge" id="pickBadge">🎯 辅助模式：点棋盘 / 候选点落子</div>
   </div>
   <div class="sidebar">
     <div class="card">
@@ -219,9 +355,9 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
         <span class="tagw">白</span>
       </div>
       <div class="legend">
-        <span><i style="background:#f0b90b"></i>最佳选点</span>
-        <span><i style="background:#37d67a"></i>≥50%</span>
-        <span><i style="background:#e0a13c"></i>&lt;50%</span>
+        <span><i style="background:#c08a1e"></i>最佳选点</span>
+        <span><i style="background:#2f9e63"></i>≥50%</span>
+        <span><i style="background:#c98a1a"></i>&lt;50%</span>
       </div>
     </div>
     <div class="card">
@@ -236,7 +372,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft Ya
   </div>
 </div>
 <script>
-var colorOf = function(win){ return win >= 50 ? '#37d67a' : (win >= 35 ? '#e0a13c' : '#e24b4a'); };
+var colorOf = function(win){ return win >= 50 ? '#2f9e63' : (win >= 35 ? '#c98a1a' : '#c9483f'); };
 
 // ---- 中国传统坐标转换 (GTP "J16" -> "九之十六") ----
 var GTP_COLS = 'ABCDEFGHJKLMNOPQRST';
@@ -296,13 +432,61 @@ function refreshStatus(){
     // 平台下拉
     var pfSel = document.getElementById('cfg-platform');
     if (pfSel && cfg.platform) pfSel.value = cfg.platform;
+    // 落子方式 (auto/assist/analyze) -> 棋盘是否可点选
+    setMode(d.mode || cfg.mode || 'auto');
     // 平台中文名
     var pfLabels = {'tencent': '腾讯围棋', 'xingzhen': '星阵围棋'};
     var pfName = pfLabels[cfg.platform] || cfg.platform || '?';
     document.getElementById('la-st-detail').textContent =
       '对手: ' + pfName + ' · 档位: ' + (cfg.level || '自定义') + ' · 思考 ' + cfg.tmin + '~' + cfg.tmax + 's · 轮询 ' + cfg.interval + 's · 默认执' + (cfg.color === 'black' ? '黑' : '白') +
       ' · 上次数据 ' + (d.data_ts || '--');
+    // 通知设置
+    var nt = cfg.notify || {};
+    var ntEn = document.getElementById('nt-enable');
+    var ntUrl = document.getElementById('nt-url');
+    if (ntEn && document.activeElement !== ntEn) ntEn.checked = !!nt.enabled;
+    if (ntUrl && document.activeElement !== ntUrl) ntUrl.value = nt.url || '';
+    // 上一局结果
+    var res = d.game_result;
+    document.getElementById('la-result').textContent = res
+      ? ('上一局: ' + (res.reason_cn || res.reason) + ' · ' + (res.moves || 0) + ' 手 · ' + (res.time || ''))
+      : '上一局: --';
+    // 看门狗状态
+    var wd = d.watchdog || {};
+    if (wd.auto) {
+      document.getElementById('la-st-detail').textContent +=
+        ' · 看门狗 ' + (wd.count ? ('已重启 ' + wd.count + ' 次') : '待命');
+    }
+    // 取图方式 (后台识别)
+    var cp = d.capture || {};
+    var sel = document.getElementById('cap-mode');
+    if (sel && document.activeElement !== sel) sel.value = cp.mode || 'auto';
+    MIRROR_ON = !!cp.mirror_on;
+    var mb = document.getElementById('cap-mirror-btn');
+    if (mb) mb.textContent = MIRROR_ON ? '开（点一下关闭）' : '关（点一下开启）';
+    var info = document.getElementById('cap-info');
+    if (info){
+      var src = cp.last === 'window' ? '窗口取图 · 后台运行中'
+              : (cp.last === 'screen' ? '全屏截图（需窗口在前台）' : '尚未取到图');
+      info.textContent = '当前来源: ' + src;
+    }
   }).catch(function(){});
+}
+function saveCapture(){
+  var v = document.getElementById('cap-mode').value;
+  apiCall('/api/capture', {mode: v}).then(function(d){
+    setMsg(d.ok ? '取图方式已保存（下个刷新周期生效）' : (d.err || '保存失败'), d.ok);
+    refreshStatus();
+  });
+}
+function toggleMirror(){
+  var next = MIRROR_ON ? 'off' : 'on';
+  apiCall('/api/capture', {mirror: next}).then(function(d){
+    setMsg('水平镜像已' + (next === 'on' ? '开启' : '关闭') +
+           '（数字棋盘左右反了就用这个切换）', d.ok);
+    document.getElementById('cap-mode').value = (d.capture || {}).mode || 'auto';
+    refreshStatus();
+  });
 }
 function saveLevel(){
   var lv = document.getElementById('cfg-level').value;
@@ -319,8 +503,10 @@ function savePlatform(){
   });
 }
 function startAI(color){
-  if (!confirm('启动 AI controller, 执' + (color==='black'?'黑':'白') + '?')) return;
-  apiCall('/api/start', {color: color}).then(function(d){
+  var mode = document.getElementById('cfg-mode').value || 'auto';
+  var modeCn = {auto: 'AI 自动落子', assist: '辅助模式（AI 只分析，你点选落子）', analyze: '仅分析（AI 不出手）'}[mode];
+  if (!confirm('启动 controller：执' + (color==='black'?'黑':'白') + '，' + modeCn + '？')) return;
+  apiCall('/api/start', {color: color, mode: mode}).then(function(d){
     setMsg(d.msg || (d.ok ? '已启动' : '启动失败'), d.ok);
     refreshStatus();
   });
@@ -357,6 +543,324 @@ function saveCfg(){
     refreshStatus();
   });
 }
+function exportSGF(){
+  apiCall('/api/export_sgf', {}).then(function(d){
+    setMsg(d.msg || (d.ok ? '已导出' : (d.err || '导出失败')), d.ok);
+  });
+}
+function saveNotify(){
+  apiCall('/api/notify', {
+    enabled: document.getElementById('nt-enable').checked,
+    url: document.getElementById('nt-url').value
+  }).then(function(d){
+    setMsg(d.msg || (d.ok ? '通知设置已保存' : (d.err || '保存失败')), d.ok);
+    refreshStatus();
+  });
+}
+function testNotify(){
+  setMsg('发送测试通知…', null);
+  apiCall('/api/notify', {test: true}).then(function(d){
+    setMsg(d.msg || (d.ok ? '已发送' : (d.err || '发送失败')), d.ok);
+  });
+}
+
+// ================= 数字棋盘 (前端绘制, 不依赖截图) =================
+var BOARD_VIEW = 'digital';
+try { BOARD_VIEW = localStorage.getItem('gaai_view') || 'digital'; } catch (e) {}
+var LAST_DATA = null;
+var MIRROR_ON = true;      // 取图是否水平翻转 (来自 /api/status)
+var MODE = 'auto';         // 当前落子方式: auto | assist | analyze (来自 /api/status)
+var BD_GEO = null;         // 数字棋盘几何 {pad, step, size}, 供点选换算坐标
+var HOVER = null;          // 悬停的交点 [col,row] (辅助模式十字准星)
+
+function setMode(m){
+  MODE = (m === 'assist' || m === 'analyze') ? m : 'auto';
+  var sel = document.getElementById('cfg-mode');
+  if (sel && sel.value !== MODE) sel.value = MODE;
+  var badge = document.getElementById('pickBadge');
+  var cv = document.getElementById('boardCanvas');
+  var picking = (MODE === 'assist');
+  if (badge) badge.classList.toggle('on', picking);
+  if (cv) cv.classList.toggle('pickable', picking);
+  var mn = {auto: 'AI 自动落子', assist: '辅助模式（你点选落子）', analyze: '仅分析（AI 不出手）'}[MODE];
+  var hint = document.getElementById('mode-hint');
+  if (hint) hint.textContent = '当前：' + mn + (picking ? ' · 点棋盘或候选点即落子' : '');
+  if (!picking) HOVER = null;
+  if (BOARD_VIEW === 'digital') drawDigitalBoard(LAST_DATA);
+}
+
+function saveMode(){
+  var v = document.getElementById('cfg-mode').value;
+  setMode(v);
+  apiCall('/api/config', {mode: v}).then(function(d){
+    setMsg(d.msg || (d.ok ? '落子方式已保存: ' + v : (d.err || '保存失败')), d.ok);
+    refreshStatus();
+  });
+}
+
+// 画布像素 -> 棋盘交点 (越界或离交点太远返回 null)
+function boardHit(ev){
+  var cv = document.getElementById('boardCanvas');
+  if (!cv || !BD_GEO) return null;
+  var r = cv.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  var x = (ev.clientX - r.left) * (BD_GEO.size / r.width);
+  var y = (ev.clientY - r.top) * (BD_GEO.size / r.height);
+  var c = Math.round((x - BD_GEO.pad) / BD_GEO.step);
+  var rw = Math.round((y - BD_GEO.pad) / BD_GEO.step);
+  if (c < 0 || c > 18 || rw < 0 || rw > 18) return null;
+  var dx = x - (BD_GEO.pad + c * BD_GEO.step), dy = y - (BD_GEO.pad + rw * BD_GEO.step);
+  if (Math.sqrt(dx*dx + dy*dy) > BD_GEO.step * 0.55) return null;
+  return [c, rw];
+}
+
+function pickPoint(col, row){
+  if (MODE !== 'assist'){
+    setMsg('当前是「' + ({auto:'AI 自动落子', analyze:'仅分析'}[MODE] || MODE) + '」模式：启动 AI 时选「辅助模式」才能点选落子', false);
+    return;
+  }
+  var cn = cnumCn(col, row);
+  apiCall('/api/pick', {col: col, row: row}).then(function(d){
+    setMsg(d.msg || (d.ok ? ('已提交 ' + cn) : (d.err || '提交失败')), d.ok);
+  });
+}
+
+function cnumCn(col, row){
+  var CN = ['一','二','三','四','五','六','七','八','九','十','十一','十二','十三','十四','十五','十六','十七','十八','十九'];
+  return CN[col] + '-' + CN[18 - row];
+}
+
+function setView(v){
+  BOARD_VIEW = (v === 'photo') ? 'photo' : 'digital';
+  try { localStorage.setItem('gaai_view', BOARD_VIEW); } catch (e) {}
+  var dig = (BOARD_VIEW === 'digital');
+  document.getElementById('stage-digital').classList.toggle('on', dig);
+  document.getElementById('stage-photo').classList.toggle('on', !dig);
+  document.getElementById('vt-digital').classList.toggle('on', dig);
+  document.getElementById('vt-photo').classList.toggle('on', !dig);
+  var hint = document.getElementById('boardHint');
+  if (hint){
+    hint.textContent = dig ? '数字棋盘 · 后台识别（窗口被遮挡/最小化也能读盘）'
+                           : '实拍截图 · analysis_overlay.png';
+  }
+  if (dig) drawDigitalBoard(LAST_DATA); else updateBoard();
+}
+
+function gtpToCR(pt){
+  var m = /^([A-T])(\d{1,2})$/.exec(pt || '');
+  if (!m) return null;
+  var c = GTP_COLS.indexOf(m[1]);
+  var n = parseInt(m[2], 10);
+  if (c < 0 || !(n >= 1 && n <= 19)) return null;
+  return [c, 19 - n];
+}
+
+function drawStone(g, x, y, r, v){
+  g.beginPath();
+  g.arc(x + r * 0.10, y + r * 0.14, r, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(70,48,18,.26)';
+  g.fill();
+  var grad = g.createRadialGradient(x - r * 0.34, y - r * 0.38, r * 0.10, x, y, r * 1.06);
+  if (v === 1){
+    grad.addColorStop(0, '#82807a'); grad.addColorStop(.45, '#393937'); grad.addColorStop(1, '#121211');
+  } else {
+    grad.addColorStop(0, '#ffffff'); grad.addColorStop(.60, '#f5f2ec'); grad.addColorStop(1, '#cfc7b8');
+  }
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2);
+  g.fillStyle = grad; g.fill();
+  if (v === 2){
+    g.lineWidth = Math.max(1, r * 0.07);
+    g.strokeStyle = 'rgba(150,140,120,.55)';
+    g.stroke();
+  }
+}
+
+function drawDigitalBoard(d){
+  var cv = document.getElementById('boardCanvas');
+  if (!cv || !cv.parentElement) return;
+  var wrap = cv.parentElement;
+  var avail = Math.min(wrap.clientWidth, wrap.clientHeight) - 2;
+  avail = Math.max(360, Math.min(avail, 1400));
+  var dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(avail * dpr);
+  cv.height = Math.round(avail * dpr);
+  cv.style.width = avail + 'px';
+  cv.style.height = avail + 'px';
+  var g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, avail, avail);
+  var size = avail;
+
+  var stones = d && d.stones;
+  var cands = (d && d.cands) || [];
+
+  // 木纹底
+  var bg = g.createLinearGradient(0, 0, size, size);
+  bg.addColorStop(0, '#ecd29e'); bg.addColorStop(.52, '#e4c68d'); bg.addColorStop(1, '#d9b277');
+  g.fillStyle = bg;
+  g.fillRect(0, 0, size, size);
+  g.save();
+  g.globalAlpha = .045;
+  g.strokeStyle = '#6b4a1e';
+  g.lineWidth = 1;
+  for (var k = -8; k < 30; k++){
+    g.beginPath();
+    g.moveTo(-size * 0.1, k * size * 0.052);
+    g.lineTo(size * 1.1, k * size * 0.052 + size * 0.20);
+    g.stroke();
+  }
+  g.restore();
+
+  var pad = Math.round(size * 0.052);
+  var inner = size - pad * 2;
+  var step = inner / 18;
+  var PX = function(c){ return pad + c * step; };
+  var PY = function(r){ return pad + r * step; };
+  BD_GEO = {pad: pad, step: step, size: size};   // 供点选换算 (boardHit)
+
+  // 网格
+  g.strokeStyle = 'rgba(112,80,38,.60)';
+  g.lineWidth = Math.max(1, step * 0.032);
+  g.beginPath();
+  for (var i = 0; i < 19; i++){
+    g.moveTo(PX(i), PY(0)); g.lineTo(PX(i), PY(18));
+    g.moveTo(PX(0), PY(i)); g.lineTo(PX(18), PY(i));
+  }
+  g.stroke();
+  g.strokeStyle = 'rgba(96,66,28,.85)';
+  g.lineWidth = Math.max(1.4, step * 0.05);
+  g.strokeRect(PX(0), PY(0), inner, inner);
+
+  // 星位
+  g.fillStyle = 'rgba(96,66,28,.9)';
+  [[3,3],[9,3],[15,3],[3,9],[9,9],[15,9],[3,15],[9,15],[15,15]].forEach(function(s){
+    g.beginPath();
+    g.arc(PX(s[0]), PY(s[1]), Math.max(2.2, step * 0.072), 0, Math.PI * 2);
+    g.fill();
+  });
+
+  // 坐标 (列 一~十九 左→右; 行 十九~一 上→下, 与 GTP 一致)
+  g.fillStyle = 'rgba(122,90,46,.68)';
+  g.font = Math.max(8, Math.round(step * 0.34)) + 'px "Microsoft YaHei",sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  for (var j = 0; j < 19; j++){
+    g.fillText(cnNum(j + 1), PX(j), pad * 0.48);
+    g.fillText(cnNum(j + 1), PX(j), size - pad * 0.48);
+    g.fillText(cnNum(19 - j), pad * 0.48, PY(j));
+    g.fillText(cnNum(19 - j), size - pad * 0.48, PY(j));
+  }
+
+  // 棋子
+  var rr = step * 0.465;
+  if (stones){
+    for (var r2 = 0; r2 < 19; r2++){
+      var row = stones[r2];
+      if (!row) continue;
+      for (var c2 = 0; c2 < 19; c2++){
+        var v = row[c2];
+        if (v) drawStone(g, PX(c2), PY(r2), rr, v);
+      }
+    }
+    // 最后一手 (红点)
+    var lm = d.last_move;
+    if (lm && lm.length && lm.length <= 4){
+      lm.forEach(function(p){
+        var cc = p[0], rw = p[1];
+        var vv = (stones[rw] && stones[rw][cc]) || 0;
+        if (!vv) return;
+        g.beginPath();
+        g.arc(PX(cc), PY(rw), Math.max(2.6, step * 0.13), 0, Math.PI * 2);
+        g.fillStyle = '#e5453a';
+        g.fill();
+      });
+    }
+  }
+
+  // 候选点
+  if (cands.length){
+    cands.slice(0, 8).forEach(function(cd, i){
+      var cr = gtpToCR(cd.pt);
+      if (!cr) return;
+      var x = PX(cr[0]), y = PY(cr[1]);
+      var aw = (cd.ai_win != null) ? cd.ai_win : cd.win;
+      var col = aw >= 50 ? '#2f9e63' : (aw >= 35 ? '#c98a1a' : '#c9483f');
+      var R = step * 0.42;
+      g.strokeStyle = col;
+      g.lineWidth = Math.max(2, step * 0.072);
+      g.beginPath(); g.arc(x, y, R, 0, Math.PI * 2); g.stroke();
+      if (i === 0){
+        g.lineWidth = Math.max(1, step * 0.032);
+        g.beginPath(); g.arc(x, y, R + step * 0.13, 0, Math.PI * 2); g.stroke();
+        g.beginPath(); g.arc(x, y, step * 0.095, 0, Math.PI * 2);
+        g.fillStyle = col; g.fill();
+      }
+      var txt = aw.toFixed(1) + '%';
+      g.font = 'bold ' + Math.max(10, Math.round(step * 0.36)) + 'px "Microsoft YaHei",sans-serif';
+      var tw = g.measureText(txt).width;
+      var th = Math.max(13, step * 0.50);
+      // 标签放在环的右上角/左上角, 并垫一个浅色胶囊底 —— 压在棋子上也能看清
+      var rightSide = (PX(cr[0]) < size * 0.62);
+      var bx = rightSide ? (x + R + step * 0.10) : (x - R - step * 0.10 - tw - 10);
+      var by = y - R - th * 0.62;
+      if (by < pad * 0.7) by = y + R + th * 0.62 - th;      // 贴顶时改放下面
+      var bw = tw + 10, bh = th;
+      g.beginPath();
+      var rad = bh / 2;
+      g.moveTo(bx + rad, by);
+      g.arcTo(bx + bw, by, bx + bw, by + bh, rad);
+      g.arcTo(bx + bw, by + bh, bx, by + bh, rad);
+      g.arcTo(bx, by + bh, bx, by, rad);
+      g.arcTo(bx, by, bx + bw, by, rad);
+      g.closePath();
+      g.fillStyle = 'rgba(255,252,245,.90)';
+      g.fill();
+      g.lineWidth = 1;
+      g.strokeStyle = col;
+      g.globalAlpha = .55;
+      g.stroke();
+      g.globalAlpha = 1;
+      g.textAlign = 'left';
+      g.textBaseline = 'middle';
+      g.fillStyle = col;
+      g.fillText(txt, bx + 5, by + bh / 2 + 0.5);
+    });
+  }
+
+  if (!stones){
+    g.fillStyle = 'rgba(84,60,26,.55)';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = '15px "Microsoft YaHei",sans-serif';
+    g.fillText('等待识别盘面…', size / 2, size / 2 - 12);
+    g.font = '11px "Microsoft YaHei",sans-serif';
+    g.fillText('（确认围棋客户端已打开并进入对局）', size / 2, size / 2 + 12);
+  }
+
+  // 辅助模式: 悬停交点十字准星 (提示"点这里就能落子")
+  if (MODE === 'assist' && HOVER){
+    var hc = HOVER[0], hr = HOVER[1];
+    var hx = PX(hc), hy = PY(hr);
+    var occupied = !!(stones && stones[hr] && stones[hr][hc]);
+    var hcol = occupied ? '#b9ad97' : '#c08a1e';
+    g.strokeStyle = hcol;
+    g.lineWidth = Math.max(2, step * 0.07);
+    g.beginPath(); g.arc(hx, hy, step * 0.44, 0, Math.PI * 2); g.stroke();
+    g.lineWidth = Math.max(1.4, step * 0.045);
+    g.beginPath();
+    g.moveTo(hx - step * 0.72, hy); g.lineTo(hx - step * 0.20, hy);
+    g.moveTo(hx + step * 0.20, hy); g.lineTo(hx + step * 0.72, hy);
+    g.moveTo(hx, hy - step * 0.72); g.lineTo(hx, hy - step * 0.20);
+    g.moveTo(hx, hy + step * 0.20); g.lineTo(hx, hy + step * 0.72);
+    g.stroke();
+    if (occupied){
+      g.font = 'bold ' + Math.max(11, Math.round(step * 0.34)) + 'px "Microsoft YaHei",sans-serif';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = 'rgba(120,104,80,.95)';
+      g.fillText('已有子', hx, hy - step * 0.95);
+    }
+  }
+}
 
 // ---- 看板数据渲染 ----
 function updateBoard(){
@@ -364,7 +868,9 @@ function updateBoard(){
   b.src = 'analysis_overlay.png?t=' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
 }
 function render(d){
+  LAST_DATA = d;
   document.getElementById('ts').textContent = '更新 ' + d.ts;
+  if (BOARD_VIEW === 'digital') drawDigitalBoard(d);
   if (d.stale){
     var sideInfo = document.getElementById('sideInfo');
     var detail = '棋盘已切换 · 等待 AI 同步';
@@ -372,14 +878,14 @@ function render(d){
       detail = '已重置对局 (执' + (d.reset.color === 'black' ? '黑' : '白') + ') · 等待 AI 同步新对局';
     }
     sideInfo.textContent = detail;
-    sideInfo.style.color = '#e0a13c';
+    sideInfo.style.color = '#c98a1a';
     document.getElementById('winNum').textContent = '--';
     document.getElementById('barB').style.width = '50%';
     document.getElementById('barW').style.width = '50%';
     document.getElementById('cnt').textContent = '0 个';
     document.getElementById('st').textContent = detail;
     document.getElementById('list').innerHTML =
-      '<div class="empty">' + detail + '<br><span style="font-size:11px;color:#5a6472">(每 ~30s 自动刷新)</span></div>';
+      '<div class="empty">' + detail + '<br><span style="font-size:11px;color:#a4977f">(每 ~30s 自动刷新)</span></div>';
     drawWinChart(null);
     return;
   }
@@ -403,7 +909,7 @@ function render(d){
 
   var list = document.getElementById('list');
   if (!d.cands.length){
-    list.innerHTML = '<div class="empty">AI 思考中，候选点即将更新…<br><span style="font-size:11px;color:#5a6472">(每 ~30s 自动刷新)</span></div>';
+    list.innerHTML = '<div class="empty">AI 思考中，候选点即将更新…<br><span style="font-size:11px;color:#a4977f">(每 ~30s 自动刷新)</span></div>';
     return;
   }
   // 候选点: 直接显示"落该点后 AI 胜率" (ai_win), 不再区分行棋方/黑方
@@ -411,12 +917,20 @@ function render(d){
   d.cands.forEach(function(c, i){
     var aw = (c.ai_win != null) ? c.ai_win : c.win;   // AI 视角胜率
     var col = colorOf(aw);
-    var barBg = (aiColor === 'B') ? 'background:#39424e' : 'background:#e0e0e0';  // AI 执色条
+    // AI 执色条: 执黑用深色, 执白用白色+描边 (浅色主题下白条需要边框才看得见)
+    var barBg = (aiColor === 'B') ? 'background:linear-gradient(180deg,#4d473e,#302c26)'
+                                  : 'background:#fff;box-shadow:inset 0 0 0 1px #ddd2bd';
     var scoreTxt = (c.score == null) ? '' : ((c.score > 0 ? '+' : '') + c.score.toFixed(1) + '目');
-    html += '<div class="cand' + (i===0 ? ' best' : '') + '">'
+    // 辅助模式: 候选行可直接点击落子
+    var cr = gtpToCR(c.pt);
+    var clickAttr = (MODE === 'assist' && cr)
+      ? ' onclick="pickPoint(' + cr[0] + ',' + cr[1] + ')" title="落子到 ' + gtpToCn(c.pt) + '"'
+      : '';
+    var cls = 'cand' + (i===0 ? ' best' : '') + ((MODE === 'assist' && cr) ? ' pickable' : '');
+    html += '<div class="' + cls + '"' + clickAttr + '>'
       + '<span class="idx">' + (i===0 ? '★' : (i+1)) + '</span>'
       + '<span class="pt" title="GTP ' + c.pt + '"><span class="cn">' + gtpToCn(c.pt) + '</span><span class="gtp">' + c.pt + '</span></span>'
-      + '<div class="bar" style="background:#333a44">'
+      + '<div class="bar" style="background:#f2ebdd">'
       +   '<div class="b" style="' + barBg + ';width:' + Math.max(aw, 1) + '%"></div>'
       + '</div>'
       + '<span class="pct" style="color:' + col + '">' + aw.toFixed(1) + '%</span>'
@@ -440,7 +954,7 @@ function drawWinChart(his){
   var aiCol = (his && his.ai_color);
   var isWhite = (aiCol === 'white' || aiCol === 'W');  // 兼容 json('white') 与内部('W')
   if (!pts || !pts.length){
-    g.fillStyle = '#5a6472'; g.font = '11px "Microsoft YaHei",sans-serif';
+    g.fillStyle = '#a4977f'; g.font = '11px "Microsoft YaHei",sans-serif';
     g.textAlign = 'center';
     g.fillText('对局推进后显示 AI 胜率曲线', w / 2, h / 2 + 4);
     return;
@@ -454,14 +968,14 @@ function drawWinChart(his){
   var X = function(x){ return padL + (x / maxX) * plotW; };
   var Y = function(y){ return padT + (1 - y / 100) * plotH; };
   // 50% 中线 + 25/75 网格
-  g.strokeStyle = 'rgba(139,148,163,.28)'; g.lineWidth = 1;
+  g.strokeStyle = 'rgba(150,134,108,.32)'; g.lineWidth = 1;
   g.setLineDash([3, 3]);
   [25, 50, 75].forEach(function(v){
     g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(w - padR, Y(v)); g.stroke();
   });
   g.setLineDash([]);
   // y 轴刻度
-  g.fillStyle = '#6b7480'; g.font = '9px "Microsoft YaHei",sans-serif'; g.textAlign = 'right';
+  g.fillStyle = '#a4977f'; g.font = '9px "Microsoft YaHei",sans-serif'; g.textAlign = 'right';
   [0, 25, 50, 75, 100].forEach(function(v){ g.fillText(v + '%', padL - 3, Y(v) + 3); });
   // x 轴刻度
   g.textAlign = 'center';
@@ -469,8 +983,9 @@ function drawWinChart(his){
   g.fillText(maxX + '手', X(maxX), h - 4);
   // 面积渐变
   var grad = g.createLinearGradient(0, padT, 0, padT + plotH);
-  var lineCol = isWhite ? '#e0e0e0' : '#f0b90b';
-  var glow = isWhite ? 'rgba(224,224,224,' : 'rgba(240,185,11,';
+  // 深色主题改浅色后: 黑方曲线用木色, 白方曲线用暖灰 (纯白在白底上看不见)
+  var lineCol = isWhite ? '#b0a48e' : '#b5813a';
+  var glow = isWhite ? 'rgba(176,164,142,' : 'rgba(181,129,58,';
   grad.addColorStop(0, glow + '.35)');
   grad.addColorStop(1, glow + '0)');
   // 折线
@@ -512,7 +1027,8 @@ function loadWinHistory(){
 }
 
 function refresh(){
-  updateBoard();
+  // 数字棋盘由 data.json 里的 stones 直接绘制, 不需要拉截图 (省带宽也省 CPU)
+  if (BOARD_VIEW === 'photo') updateBoard();
   fetch('data.json?t=' + Date.now(), {cache:'no-store'})
     .then(function(r){ return r.json(); })
     .then(render)
@@ -520,6 +1036,36 @@ function refresh(){
   _laTick++;
   if (launcherOpen || _laTick % 3 === 1) refreshStatus();
 }
+var _rsz = null;
+window.addEventListener('resize', function(){
+  if (_rsz) clearTimeout(_rsz);
+  _rsz = setTimeout(function(){ if (BOARD_VIEW === 'digital') drawDigitalBoard(LAST_DATA); }, 160);
+});
+/* ===== 辅助模式: 棋盘点选落子 (只在 MODE==='assist' 时响应) ===== */
+(function bindBoardPick(){
+  var cv = document.getElementById('boardCanvas');
+  if (!cv) return;
+  cv.addEventListener('click', function(ev){
+    if (MODE !== 'assist' || BOARD_VIEW !== 'digital') return;
+    var pt = boardHit(ev);
+    if (!pt){ setMsg('请点在棋盘交点上', false); return; }
+    var st = LAST_DATA && LAST_DATA.stones;
+    if (st && st[pt[1]] && st[pt[1]][pt[0]]){ setMsg('该点已有子', false); return; }
+    pickPoint(pt[0], pt[1]);
+  });
+  cv.addEventListener('mousemove', function(ev){
+    if (MODE !== 'assist' || BOARD_VIEW !== 'digital') return;
+    var pt = boardHit(ev);
+    var same = (HOVER && pt && HOVER[0] === pt[0] && HOVER[1] === pt[1]) || (!HOVER && !pt);
+    if (same) return;                       // 只在悬停交点变化时重绘, 避免频繁重画
+    HOVER = pt;
+    drawDigitalBoard(LAST_DATA);
+  });
+  cv.addEventListener('mouseleave', function(){
+    if (HOVER){ HOVER = null; if (BOARD_VIEW === 'digital') drawDigitalBoard(LAST_DATA); }
+  });
+})();
+setView(BOARD_VIEW);
 refresh();
 setInterval(refresh, 2000);
 
@@ -546,7 +1092,7 @@ function gatePreload(){
     if (d && d.ok){ _gateAuto = true; gatePoll(); }
     else if (d && d.err){
       $('gate-state').textContent = '启动失败: ' + d.err;
-      $('gate-state').style.color = '#ff6b6b';
+      $('gate-state').style.color = '#c9483f';
     }
   }).catch(function(){
     if (btn){ btn.disabled = false; btn.textContent = '▶ 启动 KataGo 预加载'; }
@@ -579,7 +1125,7 @@ function gatePoll(){
       sub.textContent = '调优完成后自动进入看板（首次约 1-4 分钟，之后有缓存只需几秒）';
     } else if (d.cold_start || starting){
       fill.style.width = '100%';
-      fill.style.background = 'linear-gradient(90deg,#3b82f6,#60a5fa)';
+      fill.style.background = 'linear-gradient(90deg,#d8a94a,#e6c47e)';
       st.textContent = 'KataGo 冷启动中…（加载模型/初始化 OpenCL）';
       sub.textContent = '引擎就绪后自动进入看板，请稍候';
     } else {

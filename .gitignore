@@ -25,3 +25,22 @@ katago/*.bin.gz
 _command.json
 win_history.json
 go_ai/_kata_service.lock
+go_ai/_controller.lock
+
+# v1.0.3 新增
+# 注意: gitignore 不支持"行内注释", 上面这些行尾的 # 会被当成路径的一部分!
+# 已被这个坑害过的条目: go_ai/settings.json / go_ai/games/ / go_ai/game_result.json
+# (它们当时并没被真正忽略, 一直漏进仓库)。注释一律单独成行。
+go_ai/settings.json
+go_ai/games/
+go_ai/game_result.json
+go_ai/notify.log
+go_ai/grid_points.png
+dist/
+dist-*/
+
+# 本地调试截图与草稿报告 (不发布)
+go_ai/_diag_*.png
+go_ai/_map_check*.png
+UPGRADE_PLAN.md
+

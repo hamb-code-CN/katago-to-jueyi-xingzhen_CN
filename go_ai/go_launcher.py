@@ -13,38 +13,12 @@ import socket
 import subprocess
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE, 'launcher_config.json')
-LOG_FILE = os.path.join(BASE, 'controller_launcher.log')
-KATA_LOG = os.path.join(BASE, 'kata_service.log')
-LOCK_PATH = os.path.join(BASE, '_launcher.lock')
-
-SERVICE_PORT = 8124   # KataGo 常驻服务端口
-
-# 智力档位 -> (思考下限, 思考上限) 秒. 决定 KataGo 每手搜索时间区间
-LEVELS = {
-    '入门新手': (0.5, 1.5),
-    '初级':     (1.5, 3.0),
-    '中级':     (3.0, 6.0),
-    '高级':     (6.0, 12.0),
-    '职业':     (12.0, 20.0),
-}
-
-# 对手软件 (棋盘来源). 决定:
-#   - 窗口检测方式 (腾讯围棋: 原生窗口 | 星阵围棋: Edge 浏览器窗口)
-#   - 轮次识别 (腾讯: 红章 OCR | 星阵: 头像蓝水滴)
-#   - 棋盘标定 (腾讯: 固定 CAL_BOARD | 星阵: 实时 detect_board)
-PLATFORMS = ('tencent', 'xingzhen')  # 腾讯围棋 | 星阵围棋
-PLATFORM_LABELS = {'tencent': '腾讯围棋', 'xingzhen': '星阵围棋'}
-
-DEFAULT_CONFIG = {
-    'tmin': 3.0,       # 随机思考下限 (秒)
-    'tmax': 6.0,       # 随机思考上限 (秒)
-    'interval': 5.0,   # 截屏轮询秒数
-    'color': 'black',  # 默认执黑
-    'watch': True,     # 同时启动看板
-    'level': '中级',    # 智力档位 ('自定义' 或 LEVELS 中的档位名)
-    'platform': 'tencent',  # 对手软件 ('tencent' 腾讯围棋 | 'xingzhen' 星阵围棋)
-}
+sys.path.insert(0, BASE)
+# 配置单一真源: 档位/平台/读写全部来自 config_store (settings.json), 本模块与看板共用
+from config_store import (  # noqa: E402
+    CONFIG_PATH, LOG_FILE, KATA_LOG, LOCK_PATH, SERVICE_PORT,
+    LEVELS, PLATFORMS, PLATFORM_LABELS, DEFAULT_CONFIG, load_config, save_config,
+)
 
 # 文件锁句柄 (保持打开期间锁有效)
 _lock_file = None
@@ -86,34 +60,8 @@ PY = sys.executable
 
 
 # ---------- 配置 ----------
-def load_config():
-    cfg = dict(DEFAULT_CONFIG)
-    try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, encoding='utf-8') as f:
-                cfg.update(json.load(f))
-    except Exception:
-        pass
-    # 档位驱动: 若 level 是内置档位, 思考时间以档位为准; 手动微调过的置为 '自定义'
-    lv = cfg.get('level')
-    if lv in LEVELS:
-        cfg['tmin'], cfg['tmax'] = LEVELS[lv]
-    else:
-        cfg['level'] = '自定义'
-    # 保证 tmin<=tmax
-    if cfg.get('tmin', 0) > cfg.get('tmax', 0):
-        cfg['tmin'], cfg['tmax'] = cfg['tmax'], cfg['tmin']
-    # 平台字段校验
-    if cfg.get('platform') not in PLATFORMS:
-        cfg['platform'] = 'tencent'
-    return cfg
-
-
-def save_config(cfg):
-    # 只保留已知键
-    clean = {k: cfg[k] for k in DEFAULT_CONFIG if k in cfg}
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clean, f, ensure_ascii=False, indent=2)
+# load_config / save_config 由 config_store 提供 (settings.json 单一真源),
+# 见文件头部的 import; 这里不再重复定义默认值与校验逻辑。
 
 
 # ---------- 进程管理 ----------
@@ -175,8 +123,30 @@ def status():
     procs = _wmic_list()
     ctrl = [p for p in procs if 'go_controller' in p[1]]
     watch = [p for p in procs if 'analysis_watch' in p[1]]
+    if not ctrl:
+        # 兜底: 进程枚举不可靠时, 用 controller 自己的单实例锁判断是否在跑。
+        # 本机 wmic 返回空 (已实测), PowerShell 也可能偶发失败;
+        # 一旦 _wmic_list 返空, 看门狗就会把"正在运行的 controller"误判为已退出,
+        # 每 30s 重复拉起一个 -> 一堆僵尸。锁文件是文件系统级的, 不依赖子进程。
+        lp = _controller_lock_pid()
+        if lp:
+            ctrl = [(lp, 'go_controller.py (lock)')]
     svc = _listen(SERVICE_PORT)
     return ctrl, watch, svc
+
+
+def _controller_lock_pid():
+    """读 _controller.lock: 锁内 PID 仍存活则返回该 PID, 否则 None。"""
+    try:
+        with open(os.path.join(BASE, '_controller.lock'), encoding='utf-8') as f:
+            pid = int(json.load(f).get('pid'))
+    except Exception:
+        return None
+    try:
+        from kata_service import _pid_alive
+        return pid if _pid_alive(pid) else None
+    except Exception:
+        return None
 
 
 def is_running():
@@ -190,6 +160,14 @@ def kill_matching(keyword):
     for pid, cmd in procs:
         if keyword in cmd:
             subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                           capture_output=True, timeout=10)
+            killed += 1
+    if not killed and keyword == 'go_controller':
+        # 进程枚举失败时的兜底: 至少干掉持锁的那个 controller,
+        # 否则「停止 AI」会点了没反应 (枚举返空 -> 以为没进程可杀)。
+        lp = _controller_lock_pid()
+        if lp:
+            subprocess.run(['taskkill', '/F', '/PID', str(lp)],
                            capture_output=True, timeout=10)
             killed += 1
     if killed:
@@ -291,11 +269,13 @@ def start_preload(max_time):
 
 
 # ---------- 启动 ----------
-def start_ai(color, cfg, with_watch):
+def start_ai(color, cfg, with_watch, mode='auto'):
+    """启动 controller。mode: auto=AI 自动落子 | assist=只分析+玩家点选落子 | analyze=只分析不出手"""
     ctrl_r, watch_r, svc, ctrl_list, _ = is_running()
     if ctrl_r:
         print(f'!! controller 已在运行 (PID {[p[0] for p in ctrl_list]}), 先停止再启动')
         return False
+    mode = mode if mode in ('auto', 'assist', 'analyze') else 'auto'
     tmin, tmax = cfg['tmin'], cfg['tmax']
     interval = cfg['interval']
     # 先确保预加载服务
@@ -305,12 +285,18 @@ def start_ai(color, cfg, with_watch):
             '--tmin', str(tmin), '--tmax', str(tmax),
             '--interval', str(interval),
             '--platform', cfg.get('platform', 'tencent')]
+    if mode == 'assist':
+        args.append('--assist')          # 只给胜率/候选, 由玩家在看板点选落子
+    elif mode == 'analyze':
+        args.append('--analyze-only')    # 只分析, 永不出手
     with open(LOG_FILE, 'w', encoding='utf-8') as logf:
         subprocess.Popen(args, cwd=BASE, stdout=logf, stderr=subprocess.STDOUT,
                          creationflags=CREATE_NO_WINDOW)
     # 子进程已继承句柄, 父进程这份必须关闭, 否则每次启动都泄漏一个文件句柄
     _invalidate_proc_cache()          # 新 controller 立即对后续 status 可见
-    print(f'[AI] 已启动: 执{"黑" if color=="black" else "白"}, 随机思考 {tmin:g}~{tmax:g}s, 轮询 {interval:g}s')
+    _mode_txt = {'assist': ' [辅助模式: AI 不出手, 看板点选落子]',
+                 'analyze': ' [仅分析模式]'}.get(mode, '')
+    print(f'[AI] 已启动: 执{"黑" if color=="black" else "白"}, 随机思考 {tmin:g}~{tmax:g}s, 轮询 {interval:g}s{_mode_txt}')
     print(f'     连接预加载服务后直接下棋, 无冷启动延迟; 日志: {LOG_FILE}')
     if with_watch:
         start_watch()

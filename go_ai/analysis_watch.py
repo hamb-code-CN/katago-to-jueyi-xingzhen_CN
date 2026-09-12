@@ -4,11 +4,12 @@
 - 本地 HTTP 服务 (端口 8123) → 浏览器打开 analysis.html 实时查看
 - 提供网页版启动器 API (整合 bat/launcher 全部功能):
     GET  /api/status   进程状态 + 配置
-    POST /api/start    启动 AI (执黑/执白, 可传 tmin/tmax/interval)
+    POST /api/start    启动 AI (执黑/执白/辅助模式, 可传 tmin/tmax/interval/mode)
     POST /api/stop     停止 AI / KataGo 预加载 (看板自身保留)
     POST /api/preload  确保 KataGo 常驻服务在跑
     POST /api/config   修改并保存启动配置 (tmin/tmax/interval/color)
     POST /api/reset    重开一局 (AI 进程不重启, 通过 _command.json 切色+重置)
+    POST /api/pick     辅助模式: 玩家点选落子 {col,row} -> 写入 _command.json 由 controller 执行
 """
 import sys, os, json, re, time, threading, functools, http.server, socketserver, socket
 import numpy as np
@@ -19,19 +20,27 @@ OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, OUT_DIR)
 from show_analysis import (find_latest_valid_log, extract_last_search, draw,
                           read_tail_text, prune_gtp_logs)
-from go_vision import detect_board, read_board, refine_pts, N
+from go_vision import detect_board, read_board, refine_pts, N, grab_for_read
 from go_controller import count_stones
 import go_launcher as L
 from go_launcher import (
     SERVICE_PORT, LEVELS, PLATFORMS, PLATFORM_LABELS, load_config, save_config, is_running, status,
     start_ai, start_watch, start_preload, kill_matching, _stop_preload,
 )
+import notify as notify_mod
+import sgf as sgf_mod
+import config_store
 
 DATA_JSON = os.path.join(OUT_DIR, 'data.json')
 WIN_HIST_JSON = os.path.join(OUT_DIR, 'win_history.json')  # 胜率走势: {"ai_color":..,"pts":[[手数,AI胜率],..]}
 COMMAND_FILE = os.path.join(OUT_DIR, '_command.json')
+GAME_RESULT_JSON = os.path.join(OUT_DIR, 'game_result.json')   # 终局结果 (controller 写)
 PORT = 8123
 REFRESH = 2  # 秒, 后端更新频率
+
+# ---- 看门狗状态 (controller 异常退出后自动拉起) ----
+_RESTART = {'armed': False, 'count': 0, 'seen_at': 0.0, 'last_try': 0.0}
+_LAST_STOP = [0.0]      # 最近一次主动停止的时间戳 (停止后短时间内不自动重启)
 
 # 胜率历史去重状态 (进程内)
 _hist_last_total = None  # 上次记录时的棋盘总手数
@@ -104,26 +113,82 @@ def record_win_history(ai_win_pct, total_stones):
         save_win_history(his.get('ai_color'), pts[-500:])  # 最多保留 500 点
 
 
-def cur_board_counts():
-    """截屏识别当前棋盘子数 (黑, 白). 失败返回 None"""
+_last_stones = None      # 上一次识别的盘面 (用于推算"最后一手", 数字棋盘标记用)
+_last_move = None        # [[col, row], ...] 最近一手
+_last_capture = 'none'   # 最近一次取图方式: window / screen / none
+
+
+def _capture_cfg():
+    """取图配置 -> (mode, mirror)。mirror='auto' 时按平台给默认值。
+
+    说明: PrintWindow 抓出来是否镜像因客户端而异 (实测 Chromium 系一般**不需要**翻转)。
+    腾讯客户端历史上一直走翻转, 这里保持原行为; 浏览器 (星阵) 默认不翻转。
+    看板里能直接看到数字棋盘, 左右反了一眼就能发现 -> 面板里有一键切换。
+    """
+    cfg = load_config().get('capture') or {}
+    mode = cfg.get('mode') or 'auto'
+    m = cfg.get('mirror') or 'auto'
+    platform = load_config().get('platform') or 'tencent'
+    if m == 'auto':
+        mirror = (platform != 'xingzhen')
+    else:
+        mirror = (m == 'on')
+    return mode, mirror
+
+
+def cur_board_snapshot():
+    """识别当前盘面。返回 (stones, counts, mode) 或 (None, None, mode)。
+
+    优先用 PrintWindow 抓**窗口内容**再识别 —— 这是后台运行的关键:
+    围棋窗口被别的程序盖住、部分遮挡甚至最小化时都能读到盘, 不再依赖前台全屏截图。
+    抓不到窗口才回落到全屏截图。mode 为 'window'/'screen'/'none', 供看板显示来源。
+    """
+    global _last_stones, _last_move, _last_capture
+    cfg_all = load_config()
+    platform = cfg_all.get('platform') or 'tencent'
+    mode_cfg, mirror = _capture_cfg()
+    prefer_window = (mode_cfg != 'screen')
+    img_bgr, _origin, mode = grab_for_read(platform, prefer_window=prefer_window,
+                                           mirror=mirror)
+    if mode_cfg == 'window' and mode != 'window':
+        _last_capture = mode
+        return None, None, mode          # 指定只用窗口取图时不做全屏回落
+    _last_capture = mode
+    if img_bgr is None:
+        return None, None, 'none'
     try:
-        img = np.array(pyautogui.screenshot())
-        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         board = detect_board(img_bgr, roi_x_max=1280)
         if board is None:
-            return None
+            return None, None, mode
         board = refine_pts(img_bgr, board)
         stones, _ = read_board(img_bgr, board)
-        return count_stones(stones)
+        # 与上一帧比, 找出新增的点作为"最后一手"
+        if _last_stones is not None and _last_stones.shape == stones.shape:
+            diff = np.argwhere((_last_stones == 0) & (stones != 0))
+            if len(diff):
+                _last_move = [[int(c), int(r)] for r, c in diff]
+            elif (stones == 0).all():
+                _last_move = None
+        _last_stones = stones
+        return stones, count_stones(stones), mode
     except Exception:
-        return None
+        return None, None, mode
 
 
-def build_json(data, stale=False, cur=None, log=None, ai_color='black'):
+def cur_board_counts():
+    """截屏识别当前棋盘子数 (黑, 白). 失败返回 None (兼容旧调用)。"""
+    stones, counts, _mode = cur_board_snapshot()
+    return counts
+
+
+def build_json(data, stale=False, cur=None, log=None, ai_color='black', snap=None):
     """构造 data.json 载荷. 新增:
       - ai_color : AI 实际执子颜色 (black/white)
       - ai_win   : 当前局面 AI 胜率 (0~100, AI 视角)
       - cands[].ai_win : 候选点落子后 AI 胜率 (AI 视角)
+      - stones   : 19x19 盘面 (0空/1黑/2白) —— 前端"数字棋盘"直接渲染, 不需要截图
+      - last_move: [[col,row],...] 最近一手 (数字棋盘标注用)
+      - capture  : 'window' 后台窗口取图 / 'screen' 全屏截图
     root_win / cands[].win 仍保留原始'行棋方胜率'以兼容旧逻辑."""
     cands = sorted(data['cands'], key=lambda c: (-c['visits'], -c['win']))
     side = data['side']
@@ -139,6 +204,15 @@ def build_json(data, stale=False, cur=None, log=None, ai_color='black'):
         })
     side_cn = '黑方' if data['side'] == 'B' else ('白方' if data['side'] == 'W' else '?')
     root = data.get('root_win')
+    stones_json = None
+    last_move = None
+    capture = 'none'
+    if snap:
+        st, _cnt, mode = snap
+        capture = mode
+        if st is not None:
+            stones_json = [[int(v) for v in row] for row in st]
+            last_move = _last_move
     return {
         'ts': time.strftime('%H:%M:%S'),
         'side': data['side'],
@@ -152,7 +226,60 @@ def build_json(data, stale=False, cur=None, log=None, ai_color='black'):
         'stale': stale,
         'cur_counts': cur,
         'log_counts': log,
+        'stones': stones_json,
+        'last_move': last_move,
+        'capture': capture,
     }
+
+
+def _supervise():
+    """看门狗: controller 进程异常退出后自动拉起。
+
+    三种"不该重启"的情况都排除掉了:
+      1) 用户主动点了停止 (120s 冷却)
+      2) 终局自动停止退出 (10 分钟内有 game_result.json)
+      3) 从未启动过 (只监督, 不擅自开跑)
+    连续重启次数超过 max_restarts 会停下, 避免崩溃循环。
+    """
+    wd = load_config().get('watchdog') or {}
+    if not wd.get('auto_restart', True):
+        return
+    now = time.time()
+    if is_running()[0]:
+        _RESTART['armed'] = True
+        _RESTART['seen_at'] = now
+        if _RESTART['count'] and now - _RESTART['last_try'] > 300:
+            _RESTART['count'] = 0        # 稳定跑够 5 分钟, 重启计数清零
+        return
+    if not _RESTART['armed']:
+        return
+    if now - _RESTART['seen_at'] < 20:          # 刚消失, 留出正常启动/退出时间
+        return
+    if now - _LAST_STOP[0] < 120:               # 主动停止
+        return
+    try:
+        if os.path.exists(GAME_RESULT_JSON) and \
+                now - os.path.getmtime(GAME_RESULT_JSON) < 600:
+            return                              # 终局自动退出
+    except OSError:
+        pass
+    if _RESTART['count'] >= int(wd.get('max_restarts', 5)):
+        return
+    if now - _RESTART['last_try'] < 30:
+        return
+    _RESTART['last_try'] = now
+    _RESTART['count'] += 1
+    cfg = load_config()
+    print(f"[watchdog] controller 已退出, 自动重启 (第 {_RESTART['count']} 次)", flush=True)
+
+    def _bg():
+        try:
+            # start_ai 内部可能阻塞等 KataGo 冷启动, 必须放后台, 否则卡住看板
+            start_ai(cfg.get('color', 'black'), cfg, False, mode=cfg.get('mode', 'auto'))
+            print('[watchdog] 重启完成', flush=True)
+        except Exception as e:
+            print('[watchdog] 重启失败:', repr(e), flush=True)
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def loop():
@@ -171,11 +298,18 @@ def loop():
                         print(f'[prune] 清理 {n} 个旧 gtp 日志')
                 except Exception:
                     pass
+            if _prune_tick % 10 == 0:      # 约每 20s 检查一次 controller 存活
+                try:
+                    _supervise()
+                except Exception as e:
+                    print('[watchdog] ERR', repr(e))
             log = find_latest_valid_log()
             if log:
                 data = extract_last_search(log)
                 if data and data['cands'] and data['root_win'] is not None:
-                    cur = cur_board_counts()
+                    # 后台取图 + 识别 (窗口 PrintWindow 优先, 失败回落全屏)
+                    snap = cur_board_snapshot()
+                    cur = snap[1] if snap[0] is not None else None
                     stale = False
                     lb = data.get('board_counts')
                     if cur is not None and lb and lb[0] is not None:
@@ -195,16 +329,17 @@ def loop():
                             total = int(lb[0] + lb[1])
                         record_win_history(ai_pct, total)
                     payload = json.dumps(build_json(data, stale=stale, cur=cur, log=lb,
-                                                    ai_color=ai_color),
+                                                    ai_color=ai_color, snap=snap),
                                          ensure_ascii=False)
                     tmp = DATA_JSON + '.tmp'
                     with open(tmp, 'w', encoding='utf-8') as f:
                         f.write(payload)
                     os.replace(tmp, DATA_JSON)  # 原子替换, 前端不会读到半截 JSON
-                    draw(stale=stale)  # 更新 analysis_overlay.png
+                    draw(stale=stale)  # 更新 analysis_overlay.png (实拍视图用)
                     print(f"[{time.strftime('%H:%M:%S')}] updated "
                           f"side={data['side']} ai={ai_color} ai_win={ai_pct} "
-                          f"cands={len(data['cands'])} cur={cur} log={lb} stale={stale}")
+                          f"cands={len(data['cands'])} cur={cur} log={lb} stale={stale} "
+                          f"capture={snap[2] if snap else 'none'}")
         except Exception as e:
             print('ERR', repr(e))
         time.sleep(REFRESH)
@@ -231,10 +366,15 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        if self.path.split('?')[0] == '/api/status':
+        path = self.path.split('?')[0]
+        if path == '/api/status':
             return self._send_json(api_status())
-        if self.path.split('?')[0] == '/api/kata_progress':
+        if path == '/api/kata_progress':
             return self._send_json(api_kata_progress())
+        if path == '/api/game_result':
+            return self._send_json(api_game_result())
+        if path == '/api/board':
+            return self._send_json(api_board())
         return super().do_GET()
 
     def do_POST(self):
@@ -252,6 +392,10 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
             elif path == '/api/config': resp = api_config(body)
             elif path == '/api/reset':  resp = api_reset(body)
             elif path == '/api/platform': resp = api_platform(body)
+            elif path == '/api/export_sgf': resp = api_export_sgf(body)
+            elif path == '/api/notify': resp = api_notify(body)
+            elif path == '/api/capture': resp = api_capture(body)
+            elif path == '/api/pick': resp = api_pick(body)
             else: resp = {'ok': False, 'err': f'unknown:{path}'}
         except Exception as e:
             resp = {'ok': False, 'err': str(e)}
@@ -280,10 +424,26 @@ def api_status():
         'watch':      {'running': bool(watch_r), 'pids': [p[0] for p in watch_list]},
         'kata_preload': {'running': bool(svc), 'port': SERVICE_PORT},
         'config': cfg,
+        'mode': cfg.get('mode', 'auto'),          # 当前落子方式 (auto/assist/analyze)
+        'modes': [{'id': m, 'label': config_store.MODE_LABELS[m]} for m in config_store.VALID_MODES],
         'levels': [{'name': k, 'tmin': v[0], 'tmax': v[1]} for k, v in LEVELS.items()],
         'platforms': [{'id': p, 'label': PLATFORM_LABELS[p]} for p in PLATFORMS],
         'data_ts': last_ts,
+        'sgf_dir': _sgf_dir(),
+        'game_result': _read_game_result(),
+        'watchdog': dict(_RESTART, auto=bool((cfg.get('watchdog') or {}).get('auto_restart', True))),
+        'capture': dict(cfg.get('capture') or {}, last=_last_capture,
+                        mirror_on=_capture_cfg()[1]),
+        'dashboard': cfg.get('dashboard') or {},
     }
+
+
+def _read_game_result():
+    try:
+        with open(GAME_RESULT_JSON, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def api_kata_progress():
@@ -332,11 +492,18 @@ _START_SEQ = [0]     # 启动序号: 新的启动或停止都会递增, 使在�
 
 
 def api_start(body):
-    """启动 AI controller (执黑/执白). 已运行则拒绝."""
+    """启动 AI controller. 已运行则拒绝.
+    body: {color, tmin, tmax, interval, watch, mode}
+    mode: auto=AI 自动落子 | assist=只分析+玩家点选落子 | analyze=只分析不出手"""
     color = body.get('color', 'black')
     if color not in ('black', 'white'):
         return {'ok': False, 'err': 'color must be black/white'}
     cfg = load_config()
+    if 'mode' in body and body['mode'] is not None:
+        if body['mode'] not in config_store.VALID_MODES:
+            return {'ok': False, 'err': 'mode must be auto/assist/analyze'}
+        cfg['mode'] = body['mode']
+    mode = cfg.get('mode', 'auto')
     for k in ('tmin', 'tmax', 'interval'):
         if k in body and body[k] is not None:
             try: cfg[k] = float(body[k])
@@ -351,10 +518,14 @@ def api_start(body):
 
     _START_SEQ[0] += 1
     token = _START_SEQ[0]
+    # 看门狗: 由本次启动"武装", 之后 controller 若异常消失会自动拉起
+    _RESTART['armed'] = True
+    _RESTART['seen_at'] = time.time()
+    _RESTART['last_try'] = time.time()
 
     def _bg():
         try:
-            start_ai(color, cfg, cfg['watch'])
+            start_ai(color, cfg, cfg['watch'], mode=mode)
         except Exception as e:
             print('ERR start_ai:', repr(e), flush=True)
             return
@@ -369,12 +540,35 @@ def api_start(body):
 
     # 后台启动: start_ai 内部可能同步等 KataGo 冷启动(最长 180s), 不能阻塞 HTTP 请求
     threading.Thread(target=_bg, daemon=True).start()
+    mode_cn = config_store.MODE_LABELS.get(mode, mode)
     return {
         'ok': True,
         'starting': True,
-        'msg': f'AI 启动中 ({"执黑" if color == "black" else "执白"}), 详见 controller_launcher.log',
+        'mode': mode,
+        'msg': f'AI 启动中 ({"执黑" if color == "black" else "执白"} · {mode_cn}), 详见 controller_launcher.log',
         'config': cfg,
     }
+
+
+def api_pick(body):
+    """辅助模式: 玩家在看板点选了一个落子点 -> 写入 _command.json, controller 下一轮执行。
+    body: {col, row} (0-based, col 左→右, row 上→下, 与看板数字棋盘一致)"""
+    if not is_running()[0]:
+        return {'ok': False, 'err': 'controller 未运行 (先以「辅助模式」启动 AI)'}
+    try:
+        col, row = int(body.get('col')), int(body.get('row'))
+    except (TypeError, ValueError):
+        return {'ok': False, 'err': 'col/row 必须是整数'}
+    if not (0 <= col < N and 0 <= row < N):
+        return {'ok': False, 'err': f'坐标越界: ({col},{row})'}
+    try:
+        with open(COMMAND_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'cmd': 'play', 'col': col, 'row': row,
+                       'ts': time.time()}, f, ensure_ascii=False)
+    except OSError as e:
+        return {'ok': False, 'err': f'写入指令失败: {e}'}
+    return {'ok': True, 'msg': f'已提交落子 ({col},{row}), 等待 controller 执行',
+            'col': col, 'row': row}
 
 
 def api_platform(body):
@@ -396,6 +590,8 @@ def api_stop(body):
     """停止 AI / KataGo 预加载. 看板自身永不自杀 (关浏览器即可不再查看)."""
     what = body.get('what', 'all')
     _START_SEQ[0] += 1          # 作废在途的异步启动, 防止停掉之后又被拉起来
+    _LAST_STOP[0] = time.time()  # 主动停止 -> 看门狗 120s 内不自动重启
+    _RESTART['count'] = 0
     n_ai = kill_matching('go_controller') if what in ('all', 'ai') else 0
     n_ka = _stop_preload() if what in ('all', 'katago') else 0
     color_cn = '黑' if load_config().get('color', 'black') == 'black' else '白'
@@ -466,8 +662,13 @@ def api_reset(body):
     # 1) 写 _command.json (controller handle_command 会读+删+执行)
     with open(COMMAND_FILE, 'w', encoding='utf-8') as f:
         json.dump({'cmd': 'set_color', 'color': color}, f, ensure_ascii=False)
-    # 1.5) 清空胜率历史 (新对局从零开始)
+    # 1.5) 清空胜率历史 (新对局从零开始) + 清掉上局结果 (看门狗据此识别"终局主动退出")
     clear_win_history()
+    try:
+        if os.path.exists(GAME_RESULT_JSON):
+            os.remove(GAME_RESULT_JSON)
+    except OSError:
+        pass
     # 2) 立即 stale 看板数据, 提示前端进入"等待新对局"状态
     stale_payload = {
         'ts': time.strftime('%H:%M:%S'),
@@ -500,13 +701,128 @@ def api_reset(body):
     }
 
 
+def _sgf_dir():
+    cfg = load_config()
+    d = (cfg.get('sgf') or {}).get('dir') or ''
+    return d or sgf_mod.default_dir()
+
+
+def api_game_result():
+    """返回上一局结果 (controller 终局时写入) 与棋谱目录信息。"""
+    res = None
+    try:
+        with open(GAME_RESULT_JSON, encoding='utf-8') as f:
+            res = json.load(f)
+    except Exception:
+        res = None
+    files = []
+    try:
+        d = _sgf_dir()
+        if os.path.isdir(d):
+            fs = [os.path.join(d, n) for n in os.listdir(d) if n.lower().endswith('.sgf')]
+            fs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            files = [{'name': os.path.basename(p), 'time': time.strftime(
+                '%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(p))),
+                'size': os.path.getsize(p)} for p in fs[:20]]
+    except Exception:
+        pass
+    return {'ok': True, 'result': res, 'sgf_dir': _sgf_dir(), 'files': files}
+
+
+def api_export_sgf(body):
+    """导出当前棋谱。
+    controller 在跑 -> 下发指令让它用内存里的真实落子顺序导出 (最准);
+    没跑 -> 直接用当前盘面快照导出 (只有摆盘, 无手数顺序)。"""
+    cfg = load_config()
+    if is_running()[0]:
+        with open(COMMAND_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'cmd': 'export_sgf'}, f, ensure_ascii=False)
+        return {'ok': True, 'msg': '已请求 controller 导出棋谱 (下个循环执行, 见 controller 日志)'}
+    # 无 controller: 用当前局面快照导出
+    try:
+        img = np.array(pyautogui.screenshot())
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        board = detect_board(img_bgr, roi_x_max=1280)
+        if board is None:
+            return {'ok': False, 'err': '未识别到棋盘, 无法导出'}
+        board = refine_pts(img_bgr, board)
+        stones, _ = read_board(img_bgr, board)
+        path = sgf_mod.save_sgf(stones=stones, out_dir=(cfg.get('sgf') or {}).get('dir') or None,
+                                comment='盘面快照导出 (AI 未运行, 无落子顺序)')
+        return {'ok': True, 'path': path, 'msg': f'已按当前盘面导出: {path}'}
+    except Exception as e:
+        return {'ok': False, 'err': str(e)}
+
+
+def api_notify(body):
+    """读取/保存通知设置; body 带 test=true 时立即发一条测试通知。"""
+    cfg = load_config()
+    if 'enabled' in body or 'url' in body:
+        n = dict(cfg.get('notify') or {})
+        if 'enabled' in body:
+            n['enabled'] = bool(body['enabled'])
+        if 'url' in body:
+            n['url'] = str(body['url'] or '').strip()
+        cfg['notify'] = n
+        save_config(cfg)
+    cur = load_config().get('notify') or {}
+    if body.get('test'):
+        n_cfg = cur if cur.get('enabled') and cur.get('url') else \
+            {'enabled': bool(cur.get('url')), 'url': cur.get('url'), 'events': []}
+        if not n_cfg.get('url'):
+            return {'ok': False, 'err': '请先填写通知地址', 'notify': cur}
+        ok = notify_mod.send('test', 'GoAI 测试通知', '通知通道工作正常 ✓',
+                             config=n_cfg, block=True)
+        return {'ok': bool(ok), 'notify': cur,
+                'msg': '测试通知已发送' if ok else '发送失败, 详见 go_ai/notify.log'}
+    return {'ok': True, 'notify': cur}
+
+
+def api_board():
+    """按需识别一次盘面 (数字棋盘刷新/`切换视图`用)。返回 stones + 最后一手。"""
+    stones, counts, mode = cur_board_snapshot()
+    return {
+        'ok': stones is not None,
+        'stones': None if stones is None else [[int(v) for v in row] for row in stones],
+        'counts': list(counts) if counts else None,
+        'last_move': _last_move,
+        'capture': mode,
+    }
+
+
+def api_capture(body):
+    """读取/修改取图方式。body: {mode?: auto|window|screen, mirror?: auto|on|off}"""
+    cfg = load_config()
+    if 'mode' in body or 'mirror' in body:
+        cp = dict(cfg.get('capture') or {})
+        if 'mode' in body:
+            cp['mode'] = str(body['mode'])
+        if 'mirror' in body:
+            cp['mirror'] = str(body['mirror'])
+        cfg['capture'] = cp
+        save_config(cfg)
+        global _last_stones, _last_move
+        _last_stones = None      # 换取图方式后旧盘面作废 (镜像状态变了)
+        _last_move = None
+    cur = load_config().get('capture') or {}
+    mode, mirror = _capture_cfg()
+    return {'ok': True, 'capture': cur, 'resolved': {'mode': mode, 'mirror': mirror,
+                                                     'last': _last_capture}}
+
+
 class DualStackServer(socketserver.ThreadingTCPServer):
     """IPv6 socket 双栈监听 (IPv4 + IPv6 同时可访问).
 
     daemon_threads/block_on_close: 每个请求线程用完即弃, 不保留在 _threads 列表里
-    (默认配置下该列表只增不减, 长时间轮询会持续吃内存)."""
+    (默认配置下该列表只增不减, 长时间轮询会持续吃内存).
+
+    allow_reuse_address 在 Windows 上**必须关掉**: 与 Linux 只允许复用 TIME_WAIT
+    不同, Windows 的 SO_REUSEADDR 允许两个进程**同时** bind 同一端口 —— 曾因此
+    同时跑起两个看板(两个看门狗), 各自去拉起 controller, 造成两个 AI 抢一块棋盘、
+    子数乱跳、胜率乱甩, 看起来就是"AI 突然变傻"。关掉后第二个实例 bind 失败并友好退出。
+    """
     address_family = socket.AF_INET6
-    allow_reuse_address = True
+    allow_reuse_address = (os.name != 'nt')
     daemon_threads = True
     block_on_close = False
 
@@ -522,7 +838,23 @@ def serve():
     # 双栈监听 (IPv4 + IPv6): 手机可通过 IPv4 或 IPv6 访问
     host = os.environ.get('BGI_WATCH_HOST', '::')
     handler = functools.partial(NoCacheHandler, directory=OUT_DIR)
-    httpd = DualStackServer((host, PORT), handler)
+    httpd = None
+    for attempt in range(3):
+        try:
+            httpd = DualStackServer((host, PORT), handler)
+            break
+        except OSError as e:
+            if attempt < 2:          # 可能只是上个实例刚退出, 端口还在 TIME_WAIT
+                print(f'[看板] 端口 {PORT} 暂不可用 ({e}), 1s 后重试...', flush=True)
+                time.sleep(1.0)
+                continue
+            print('=' * 56)
+            print(f'[看板] 无法绑定端口 {PORT}: {e}')
+            print('       很可能已有一个看板在运行 —— 同一台机器只应跑一个看板')
+            print('       (两个看板会各自拉起 controller, 互相抢棋盘, 表现为 AI "变傻")。')
+            print('       请先关掉多余的看板窗口再重试。')
+            print('=' * 56)
+            return
     print(f'serving http://{host}:{PORT} (IPv4+IPv6 双栈)')
     print(f'  本机: http://127.0.0.1:{PORT}/analysis.html')
     print(f'  局域网 IPv4: http://<电脑IPv4>:{PORT}/analysis.html')

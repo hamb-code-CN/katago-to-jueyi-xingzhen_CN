@@ -14,6 +14,45 @@ GO_WINDOW_TITLES = ('腾讯围棋', '对局', '19路')
 BROWSER_WINDOW_TITLES = ('星阵围棋', '19x19', '围棋', 'Galaxy', 'GALAXY')
 
 
+def _enum_windows(title_keys=None, class_keys=None, require_area=None):
+    """枚举可见顶层窗口, 返回 [(hwnd, title, rect), ...] 按面积降序。
+
+    title_keys: 标题需含其中任一关键词
+    class_keys: 窗口类名需含其中任一关键词
+    require_area: (min_w, min_h) 过滤过小的窗口
+    """
+    user32 = ctypes.windll.user32
+    found = []
+
+    def enum_proc(hwnd, lparam):
+        if user32.IsWindowVisible(hwnd):
+            title = ''
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+            if title_keys and not any(k in title for k in title_keys):
+                return True
+            if class_keys:
+                cb = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, cb, 256)
+                if not any(k in cb.value for k in class_keys):
+                    return True
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w, h = rect.right - rect.left, rect.bottom - rect.top
+            if require_area and (w < require_area[0] or h < require_area[1]):
+                return True
+            found.append((hwnd, title, (rect.left, rect.top, rect.right, rect.bottom)))
+        return True
+
+    user32.EnumWindows(
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_proc), 0)
+    found.sort(key=lambda f: (f[2][2] - f[2][0]) * (f[2][3] - f[2][1]), reverse=True)
+    return found
+
+
 def find_browser_window():
     """枚举可见窗口, 返回浏览器窗口 rect (left, top, right, bottom) 或 None.
     匹配策略: 标题同时含浏览器标识 (Edge/Chrome) 和棋盘关键词 (星阵围棋/19x19).
@@ -47,59 +86,25 @@ def find_browser_window():
 def find_go_window():
     """枚举可见窗口, 返回腾讯围棋窗口 rect (left, top, right, bottom) 或 None.
     窗口锁定: 无论窗口拖到哪/缩多大, 都能定位, 棋盘检测只在该窗口内进行."""
-    user32 = ctypes.windll.user32
-    found = []
-
-    def enum_proc(hwnd, lparam):
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value
-                if any(k in title for k in GO_WINDOW_TITLES):
-                    rect = wintypes.RECT()
-                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                    found.append((hwnd, title, (rect.left, rect.top, rect.right, rect.bottom)))
-        return True
-
-    user32.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_proc), 0)
-    if not found:
-        return None
-    best = max(found, key=lambda f: (f[2][2] - f[2][0]) * (f[2][3] - f[2][1]))
-    return best[2]
+    hits = _enum_windows(title_keys=GO_WINDOW_TITLES)
+    return hits[0][2] if hits else None
 
 
-def capture_go_window():
-    """用 PrintWindow 抓腾讯围棋窗口内容 (不依赖屏幕显示, 隐藏/最小化也能截).
-    返回 (hwnd, rect, img_bgr) 或 (None, None, None).
-    img_bgr 是窗口内容 BGR 数组 (已水平翻转消除镜像)."""
-    import cv2
+def capture_window(hwnd, rect, mirror=True):
+    """用 PrintWindow 抓指定窗口内容, 返回 BGR 数组 或 None。
+
+    关键点 (后台运行的基础): PrintWindow 拿的是**窗口自己的渲染内容**,
+    不需要窗口在最前面, 被别的窗口盖住 / 最小化都还能取到像 —— 而 pyautogui
+    全屏截图只能拍到屏幕上可见的部分。
+
+    mirror: 是否水平翻转。实测不同客户端表现不同 (Chromium/Electron 系一般**不需要**翻转),
+    所以默认值可由配置 capture.mirror 控制; 看板能实时看到数字棋盘, 反了一眼就能看出来。"""
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
-    found = []
-
-    def enum_proc(hwnd, lparam):
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                if any(k in buf.value for k in GO_WINDOW_TITLES):
-                    rect = wintypes.RECT()
-                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                    found.append((hwnd, (rect.left, rect.top, rect.right, rect.bottom)))
-        return True
-
-    user32.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_proc), 0)
-    if not found:
-        return None, None, None
-    best = max(found, key=lambda f: (f[1][2] - f[1][0]) * (f[1][3] - f[1][1]))
-    hwnd, rect = best
     l, t, r, b = rect
     w, h = r - l, b - t
     if w <= 0 or h <= 0:
-        return hwnd, rect, None
+        return None
     hdc_win = user32.GetWindowDC(hwnd)
     hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
     bmp = gdi32.CreateCompatibleBitmap(hdc_win, w, h)
@@ -119,11 +124,34 @@ def capture_go_window():
     gdi32.GetDIBits(hdc_mem, bmp, 0, h, buf, ctypes.byref(bih), 0)
     gdi32.DeleteObject(bmp); gdi32.DeleteDC(hdc_mem); user32.ReleaseDC(hwnd, hdc_win)
     if not ret:
-        return hwnd, rect, None
+        return None
     arr = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
     img = arr[:, :, :3].copy()  # BGRA 前3通道就是 BGR 顺序, 不要翻转通道 (否则红蓝互换)
-    img = cv2.flip(img, 1)  # 水平翻转消除镜像
-    return hwnd, rect, img
+    return cv2.flip(img, 1) if mirror else img
+
+
+def capture_window_for(platform='tencent', mirror=True):
+    """按平台找棋盘窗口并抓图。返回 (hwnd, rect, img); 找不到/失败返回 (None, None, None)。
+
+    img 是**窗口局部**坐标的图 (0,0 = 窗口左上角)。
+    调用方如需屏幕绝对坐标, 把 rect 的 left/top 加上去即可 (见 offset_board)。"""
+    if platform == 'xingzhen':
+        # 浏览器窗口: 标题要同时含浏览器标识和棋盘关键词
+        hits = [(hwnd, title, rect)
+                for hwnd, title, rect in _enum_windows(title_keys=BROWSER_WINDOW_TITLES)
+                if any(b in title for b in ('Edge', 'Chrome', 'Mozilla', 'Brave', 'Opera'))]
+    else:
+        hits = _enum_windows(title_keys=GO_WINDOW_TITLES)
+    for hwnd, _title, rect in hits:
+        img = capture_window(hwnd, rect, mirror=mirror)
+        if img is not None and getattr(img, 'size', 0):
+            return hwnd, rect, img
+    return None, None, None
+
+
+def capture_go_window(mirror=True):
+    """兼容旧调用: 抓腾讯围棋窗口, 返回 (hwnd, rect, img_bgr) 或 (None, None, None)。"""
+    return capture_window_for('tencent', mirror=mirror)
 
 
 def _wood_mask(roi):
@@ -445,33 +473,125 @@ def refine_pts_local(img, board):
     return nb
 
 
-def read_board(img, board, debug=False):
-    """读子: 交点 patch 均值法 (比连通域鲁棒, 不受棋子反光影响).
-    返回 19x19 数组 (0空 1黑 2白). 调用方应先用 refine_pts 校正 board."""
+# 读子经验阈值 (历史值): 黑子灰度上限 / 白子饱和度上限
+BLACK_GRAY_THR = 150.0
+WHITE_SAT_THR = 80.0
+
+# "最后一手"标记 (朱砂红方块/三角) 会盖住棋子中心, 读子前必须剔除, 否则
+# 带标记的棋子 patch 均值被拉红 -> 判定为空点 -> 引擎认为该点空着可以走 ->
+# 反复点同一个被占的点, 子数永远不变 -> 无限重试 (2026-09-12 实测:
+# 白子均值从 (213,209,191) 变成 (225,153,140), 饱和度 0.35 远超白子阈值)
+MARKER_RED_RG = 50        # R - G 超过此值
+MARKER_RED_RB = 70        # 且 R - B 超过此值
+MARKER_RED_GB = 45        # 且 |G - B| 小于此值 (木色 G>B 明显, 不会误剔)
+MARKER_KEEP_MIN = 0.4     # 剔除后剩余像素少于该比例 -> 判据不可信, 退回整块统计
+
+
+def marker_red_mask(img):
+    """朱砂红标记像素掩码 (True=标记, 读子时剔除)。"""
+    b = img[:, :, 0].astype(np.int16)
+    g = img[:, :, 1].astype(np.int16)
+    r = img[:, :, 2].astype(np.int16)
+    return ((r - g > MARKER_RED_RG) & (r - b > MARKER_RED_RB)
+            & (np.abs(g - b) < MARKER_RED_GB))
+
+
+def _patch_stats(gray, s_ch, red, x, y, half, shape):
+    """交点邻域内剔除红色标记后的 (灰度均值, 饱和度均值); 邻域过小返回 None。"""
+    h, w = shape
+    x0, y0 = max(0, x - half), max(0, y - half)
+    x1, y1 = min(w, x + half + 1), min(h, y + half + 1)
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return None
+    p_g = gray[y0:y1, x0:x1]
+    p_s = s_ch[y0:y1, x0:x1]
+    if red is not None:
+        keep = ~red[y0:y1, x0:x1]
+        if keep.sum() >= MARKER_KEEP_MIN * keep.size:
+            p_g = p_g[keep]
+            p_s = p_s[keep]
+    return float(p_g.mean()), float(p_s.mean())
+
+
+def auto_thresholds(img, board, gray=None, s_ch=None):
+    """按盘面自适应推导读子阈值, 返回 (黑子灰度上限, 白子饱和度上限)。
+
+    原理: 361 个交点的 patch 均值里,**空点(木色)必然是最大的那一簇** (即使终局,
+    空点也仍然存在且占多数或接近多数), 用直方图取众数即得木色基准, 再由它推阈值:
+        黑子灰度上限 = 0.78 x 木色灰度   (明显更暗才算黑子)
+        白子饱和度上限 = 0.72 x 木色饱和度 (木色是高饱和, 白子接近无饱和)
+    在当前校准屏上 (木色灰度~190 / 饱和~108) 得到 148/78 ≈ 历史经验值 150/80,
+    所以行为与旧版本一致; 换主题/缩放后能自动跟上。
+    推导不可靠时 (样本太少/木色过暗) 返回经验值。"""
+    try:
+        pts = board['pts']
+        step = board['step']
+        if gray is None:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if s_ch is None:
+            s_ch = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 1]
+        red = marker_red_mask(img)
+        half = max(2, int(step * 0.45))
+        means, sats = [], []
+        for j in range(N):
+            for i in range(N):
+                x, y = int(pts[j, i, 0]), int(pts[j, i, 1])
+                st = _patch_stats(gray, s_ch, red, x, y, half, gray.shape[:2])
+                if st is None:
+                    continue
+                means.append(st[0])
+                sats.append(st[1])
+        if len(means) < 80:
+            return BLACK_GRAY_THR, WHITE_SAT_THR
+        arr = np.asarray(means, dtype=np.float32)
+        hist, edges = np.histogram(arr, bins=32, range=(0, 256))
+        k = int(np.argmax(hist))                     # 最大簇 = 木色
+        bin_lo, bin_hi = float(edges[k]), float(edges[k + 1])
+        in_bin = (arr >= bin_lo) & (arr < bin_hi)
+        wood_gray = float(np.median(arr[in_bin])) if in_bin.any() else float(np.median(arr))
+        if wood_gray < 95:                           # 木色过暗 -> 推导不可信
+            return BLACK_GRAY_THR, WHITE_SAT_THR
+        sats_arr = np.asarray(sats, dtype=np.float32)
+        wood_sat = float(np.median(sats_arr[np.abs(arr - wood_gray) < 12])) \
+            if (np.abs(arr - wood_gray) < 12).any() else float(np.median(sats_arr))
+        if wood_sat < 40:
+            return BLACK_GRAY_THR, WHITE_SAT_THR
+        black_thr = max(60.0, min(0.78 * wood_gray, 170.0))
+        white_thr = max(40.0, min(0.72 * wood_sat, 115.0))
+        return black_thr, white_thr
+    except Exception:
+        return BLACK_GRAY_THR, WHITE_SAT_THR
+
+
+def read_board(img, board, debug=False, thresholds=None):
+    """读子: 交点 patch 均值法 (比连通域鲁棒, 不受棋子反光影响)。
+    返回 19x19 数组 (0空 1黑 2白). 调用方应先用 refine_pts 校正 board。
+    thresholds: (黑子灰度上限, 白子饱和度上限); 不传则按盘面自适应推导,
+    换主题/显示器/缩放后无需改代码 (推导失败退回经验值 150/80)。"""
     pts = board['pts']
     step = board['step']
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     s_ch = hsv[:, :, 1]
+    if thresholds is None:
+        thresholds = auto_thresholds(img, board, gray=gray, s_ch=s_ch)
+    black_thr, white_sat_thr = thresholds
+    red = marker_red_mask(img)
     stones = np.zeros((N, N), dtype=np.int8)
     half = int(step * 0.45)  # 交点邻域半宽 (45% 步长, 不碰相邻交点/窗口边框)
-    h, w = img.shape[:2]
     for j in range(N):
         for i in range(N):
             x, y = int(pts[j, i, 0]), int(pts[j, i, 1])
-            x0, y0 = max(0, x - half), max(0, y - half)
-            x1, y1 = min(w, x + half + 1), min(h, y + half + 1)
-            if x1 - x0 < 6 or y1 - y0 < 6:
+            st = _patch_stats(gray, s_ch, red, x, y, half, img.shape[:2])
+            if st is None:
                 continue
-            p_g = gray[y0:y1, x0:x1]
-            p_s = s_ch[y0:y1, x0:x1]
-            mg = float(p_g.mean())
-            ms = float(p_s.mean())
-            if mg < 150:
+            mg, ms = st
+            if mg < black_thr:
                 stones[j, i] = BLACK
-            elif ms < 80:
+            elif ms < white_sat_thr:
                 # 低饱和度 = 白子 (含带黑三角"最后一手"标记的白子,
-                # 标记会拉低均值但饱和度仍低; 木色空点饱和度 ~108 不会误判)
+                # 标记会拉低均值但饱和度仍低; 木色空点饱和度 ~108 不会误判;
+                # 朱砂红标记已在 _patch_stats 里剔除, 不会把白子拉成空点)
                 stones[j, i] = WHITE
     dbg = img.copy() if debug else None
     if debug:
@@ -518,44 +638,101 @@ def board_to_pixel(board, col, row):
     return int(round(x)), int(round(y))
 
 
-def detect_turn_side(img, mid_x=391):
-    """检测腾讯围棋界面 '黑方行棋/白方行棋' 印章 (朱砂红圆章).
-    印章特征: 红色圆底 + 白字. 按列统计朱砂红像素密度找最大密集簇.
-    cx < mid_x -> 黑方方行棋, cx > mid_x -> 白方行棋.
-    子数法在预设局面(如"常见问题")会失效, 此函数可靠.
-    返回 'B'/'W'/None.
+def offset_board(board, dx, dy):
+    """把"窗口局部坐标"的 board 平移成"屏幕绝对坐标" (点击时用)。
+
+    用 PrintWindow 抓窗口时, 棋盘坐标是相对窗口左上角的; pyautogui 点击需要屏幕
+    绝对坐标, 因此把窗口原点加回去。dx/dy 为 0 时原样返回。"""
+    if board is None or 'pts' not in board or (dx == 0 and dy == 0):
+        return board
+    nb = dict(board)
+    nb['pts'] = np.asarray(board['pts'], dtype=np.float64) + np.array([float(dx), float(dy)])
+    for k in ('vx', 'hy'):
+        if k in board:
+            nb[k] = [v + (dx if k == 'vx' else dy) for v in board[k]]
+    for k, d in (('x0', dx), ('x1', dx), ('y0', dy), ('y1', dy)):
+        if k in board:
+            nb[k] = int(round(board[k] + d))
+    if 'wood_rect' in board:
+        bx, by, bx1, by1 = board['wood_rect']
+        nb['wood_rect'] = (bx + dx, by + dy, bx1 + dx, by1 + dy)
+    return nb
+
+
+def grab_for_read(platform='tencent', prefer_window=True, mirror=True):
+    """取一张"可用来读盘"的图。返回 (img, origin, mode)。
+
+    prefer_window=True (默认): 先用 PrintWindow 抓棋盘窗口 —— 这是**后台识别**的基础,
+    窗口被别的程序盖住、甚至最小化时依然能拿到内容, 不依赖屏幕前台状态。
+    抓不到 (窗口不存在 / PrintWindow 失败) 再回落到全屏截图 (pyautogui)。
+
+    origin = (left, top): img 里 (0,0) 对应屏幕上的哪个点。
+      - 窗口模式: 窗口左上角; 棋盘坐标是窗口局部的, 要点鼠标需 offset_board() 加回原点。
+      - 全屏模式: (0, 0)。
+    mode = 'window' | 'screen' | 'none'
+    """
+    if prefer_window:
+        hwnd, rect, img = capture_window_for(platform, mirror=mirror)
+        if img is not None and getattr(img, 'size', 0):
+            return img, (rect[0], rect[1]), 'window'
+    try:
+        import pyautogui
+        img = pyautogui.screenshot()
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR), (0, 0), 'screen'
+    except Exception:
+        return None, (0, 0), 'none'
+
+
+def detect_turn_side(img, mid_x=None, top_frac=0.45):
+    """检测界面顶部 '黑方行棋/白方行棋' 印章 (朱砂红圆章).
+    印章特征: 红色圆底 + 白字. 先在上部区域里自动定位红像素最密的高度带,
+    再在该带内按列找最大簇 -> 簇中心 < mid_x 判黑方行棋, 否则白方。
+
+    旧实现把高度带写死成 y150:260、分界写死 mid_x=391 (只对某一种窗口尺寸成立),
+    窗口一缩放就失效。现在高度带自动搜索, 分界默认取画面中线 (印章左右分列)。
+    返回 'B'/'W'/None。
     """
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, w = img.shape[:2]
+    if mid_x is None:
+        mid_x = w // 2
     # 朱砂红: H 0-12 或 170-180, S 60-170, V 150-240 (实测印章 HSV ~H5-11,S60-130,V150-240)
     m1 = cv2.inRange(hsv, (0, 60, 150), (12, 170, 240))
     m2 = cv2.inRange(hsv, (170, 60, 150), (180, 170, 240))
-    mask = (m1 | m2).astype(np.uint8)
-    # 只关注印章所在高度带 (窗口内 y 150-260)
-    m = mask[150:260, :]
-    # 形态学闭运算连接成块
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-    col_sum = (m > 0).sum(axis=0)
+    mask = ((m1 | m2) > 0).astype(np.uint8)
+    # 只在画面顶部区域找 (印章在顶部状态栏)
+    top = mask[:max(40, int(h * top_frac)), :]
+    if top.size == 0 or top.sum() < 30:
+        return None
+    # 1) 自动定位印章所在高度带: 按行密度取峰值, 向两侧扩到低于阈值处
+    row_sum = top.sum(axis=1)
+    peak = int(np.argmax(row_sum))
+    thr = max(2, int(row_sum[peak] * 0.35))
+    y0 = peak
+    while y0 > 0 and row_sum[y0 - 1] >= thr:
+        y0 -= 1
+    y1 = peak
+    while y1 < len(row_sum) - 1 and row_sum[y1 + 1] >= thr:
+        y1 += 1
+    # 2) 形态学闭运算把印章连成块, 再按列找最大密集簇
+    band = mask[max(0, y0 - 3):min(mask.shape[0], y1 + 4), :]
+    band = cv2.morphologyEx(band, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    col_sum = band.sum(axis=0)
     best = None
-    start = 0
-    in_cluster = False
-    cur_sum = 0
+    start = None
+    cur = 0
     for x in range(len(col_sum)):
-        if col_sum[x] > 8:
-            if not in_cluster:
-                start = x
-                in_cluster = True
-                cur_sum = 0
-            cur_sum += int(col_sum[x])
-        else:
-            if in_cluster:
-                cx = (start + x - 1) // 2
-                if best is None or cur_sum > best[2]:
-                    best = (cx, x - start, cur_sum)
-                in_cluster = False
-    if in_cluster:
-        cx = (start + len(col_sum) - 1) // 2
-        if best is None or cur_sum > best[2]:
-            best = (cx, len(col_sum) - start, cur_sum)
-    if best is None:
+        if col_sum[x] > 3:
+            if start is None:
+                start, cur = x, 0
+            cur += int(col_sum[x])
+        elif start is not None:
+            if best is None or cur > best[2]:
+                best = ((start + x - 1) // 2, x - start, cur)
+            start = None
+    if start is not None:
+        if best is None or cur > best[2]:
+            best = ((start + len(col_sum) - 1) // 2, len(col_sum) - start, cur)
+    if best is None or best[1] < 8:      # 太窄多半是噪声
         return None
     return 'B' if best[0] < mid_x else 'W'

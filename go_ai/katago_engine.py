@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """KataGo 引擎封装 (GTP 协议)
-- subprocess 启动 katago gtp
-- 输入: 19x19 棋盘 (0空/1黑/2白) + 我方颜色
-- 输出: (col, row) 落点 或 (-1,-1) pass
-- 超时保护: 思考超时则中断并重启进程
+
+I/O 设计 (v1.0.3 重写):
+  旧的实现是"每发一条命令起一个临时线程 readline(), 超时就把线程塞进 _pending,
+  下次发命令前逐个 join (最长 45s)" —— 能用, 但本质是用线程泄漏换正确性,
+  一旦读写交错就会拖慢甚至卡住整步。
+  现在改成: 进程启动时起 **1 个常驻 reader 线程** 把 stdout 逐行写进 queue,
+  _send 只是"写命令 + 带超时取队列"。超时的响应靠 _stale 计数在下次发送前丢弃,
+  竞态从设计上消失, 且超时不会再污染后续命令。
 """
 import os
 import sys
 import re
+import queue
 import subprocess
 import threading
 import time
@@ -25,7 +30,6 @@ EMPTY, BLACK, WHITE = 0, 1, 2
 # ---- KataGo 路径解析 (便携化) ----
 # 优先找代码目录同级 ../katago (便携包结构: <包>/go_ai + <包>/katago),
 # 找不到则回退本机原路径 D:\katago. 整目录拷到别的电脑后自动识别, 无需改代码.
-# 引擎根只需含 opencl171/katago.exe + gtp.cfg; 模型可单独下载/替换, 见 _resolve_model.
 def _find_katago_root():
     _base = os.path.dirname(os.path.abspath(__file__))
     _cands = [
@@ -79,191 +83,252 @@ class KataGoEngine:
         self.max_time = max_time
         self.log_cb = log_cb
         self.proc = None
-        self.lock = threading.Lock()
-        self._pending = []  # 超时命令的迟到响应读取线程 (下次发命令前排空)
+        self.lock = threading.Lock()      # 串行化所有 GTP 交互
+        self._q = queue.Queue()           # stdout 行队列 (常驻 reader 线程填充)
+        self._reader = None
+        self._err_thread = None
+        self._err_tail = []               # stderr 尾部 (有上限)
+        self._ready_evt = threading.Event()
+        self._stale = 0                   # 超时未取走的响应条数
+        self.restarts = 0
+        self.last_error = None
+
+    # ---------------- 生命周期 ----------------
+    @property
+    def alive(self):
+        return bool(self.proc) and self.proc.poll() is None
 
     def start(self, wait_ready=True):
-        if self.proc and self.proc.poll() is None:
-            return
+        if self.alive:
+            return self.proc
         cmd = [self.exe, 'gtp', '-model', self.model, '-config', self.cfg]
         self.log_cb(f'[KataGo] 启动: {" ".join(cmd)}')
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, cwd=os.path.dirname(self.exe))
+            text=True, bufsize=1, encoding='utf-8', errors='replace',
+            cwd=os.path.dirname(self.exe))
+        self._q = queue.Queue()
+        self._stale = 0
+        self._ready_evt.clear()
+        self._start_reader()
         if wait_ready:
-            # 等待 stderr 出现 "GTP ready" (冷启动 shader 编译 + tuning 缓存可能需要 150s+)
+            # 等待 "GTP ready" (冷启动 shader 编译 + tuning 缓存可能需要 150s+)
             self._wait_ready(180.0)
             self.log_cb('[KataGo] 就绪')
         return self.proc
 
-    def _wait_ready(self, timeout=180.0):
-        """读 stderr 直到出现 'GTP ready', 超时则抛错 (Windows 兼容: 线程读)"""
-        import queue
-        # 有上限: 启动后就绪后不再有消费者, 无上限会让 stderr 输出持续堆积
-        q = queue.Queue(maxsize=200)
+    def restart(self, wait_ready=True):
+        """进程已死时重建 (供 kata_service 看门狗调用)。"""
+        self.stop()
+        self.restarts += 1
+        self.log_cb(f'[KataGo] 重启引擎 (第 {self.restarts} 次)')
+        return self.start(wait_ready=wait_ready)
 
-        def _push(line):
+    def _start_reader(self):
+        """常驻 reader: stdout 逐行入队, EOF 时投递 None 哨兵。"""
+        def _loop():
             try:
-                q.put_nowait(line)
-            except queue.Full:          # 满了丢最旧的一行
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    q.put_nowait(line)
-                except queue.Full:
-                    pass
-
-        def _reader():
-            try:
-                for line in self.proc.stderr:
-                    _push(line)
+                for line in self.proc.stdout:
+                    self._q.put(line)
             except Exception:
                 pass
-        rt = threading.Thread(target=_reader, daemon=True)
-        rt.start()
+            finally:
+                try:
+                    self._q.put(None)
+                except Exception:
+                    pass
+        self._reader = threading.Thread(target=_loop, daemon=True)
+        self._reader.start()
+
+        def _err_loop():
+            try:
+                for line in self.proc.stderr:
+                    self._err_tail.append(line)
+                    if len(self._err_tail) > 200:
+                        del self._err_tail[:100]
+                    if 'GTP ready' in line or 'beginning main protocol loop' in line:
+                        self._ready_evt.set()
+                    if 'Uncaught exception' in line or 'Fatal' in line:
+                        self.last_error = line.strip()
+            except Exception:
+                pass
+        self._err_thread = threading.Thread(target=_err_loop, daemon=True)
+        self._err_thread.start()
+
+    def _wait_ready(self, timeout=180.0):
         start = time.time()
-        tail_buf = []
         while time.time() - start < timeout:
             if self.proc.poll() is not None:
                 raise RuntimeError(f'KataGo 进程提前退出 (exit={self.proc.returncode})')
-            try:
-                line = q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            tail_buf.append(line)
-            if len(tail_buf) > 200:
-                tail_buf.pop(0)
-            if 'GTP ready' in line or 'beginning main protocol loop' in line:
+            if self.last_error:
+                raise RuntimeError(f'KataGo 启动失败: {self.last_error}')
+            if self._ready_evt.wait(0.5):
                 return
-            if 'Uncaught exception' in line or 'Fatal' in line:
-                raise RuntimeError(f'KataGo 启动失败: {line.strip()}')
-        raise TimeoutError(f'KataGo 未就绪 (等待 {timeout}s): ...{"".join(tail_buf)[-500:]}')
+        raise TimeoutError(f'KataGo 未就绪 (等待 {timeout}s): ...{"".join(self._err_tail)[-500:]}')
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            try:
-                self._send('quit')
-            except Exception:
-                pass
-            try:
-                self.proc.kill()
-            except Exception:
-                pass
+        proc = self.proc
         self.proc = None
-
-    def _flush_pending(self, timeout=45.0):
-        """排空此前超时命令的迟到响应, 保证 GTP 请求/响应一一对应."""
-        for th in getattr(self, "_pending", []):
+        if proc and proc.poll() is None:
             try:
-                th.join(timeout)
+                proc.stdin.write('quit\n')
+                proc.stdin.flush()
             except Exception:
                 pass
-        self._pending = []
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        for th in (self._reader, self._err_thread):
+            try:
+                if th and th.is_alive():
+                    th.join(timeout=2)
+            except Exception:
+                pass
+        self._reader = self._err_thread = None
+
+    # ---------------- GTP I/O ----------------
+    def _take_line(self, deadline):
+        """从队列取一行 (相对 deadline 超时)。EOF 时抛错。"""
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
+                raise TimeoutError('KataGo 响应超时')
+            try:
+                ln = self._q.get(timeout=min(remain, 0.25))
+            except queue.Empty:
+                continue
+            if ln is None:
+                raise RuntimeError('KataGo 输出流已关闭 (进程可能已退出)')
+            return ln
+
+    def _read_response(self, timeout):
+        """读一条完整 GTP 响应 (读到空行为止)。
+        返回 (prefix, content_lines); prefix 为 '=' 或 '?'。"""
+        deadline = time.time() + timeout
+        s = self._take_line(deadline).rstrip('\r\n')
+        # 容错: 丢弃非响应行 (引擎偶发的裸输出)
+        guard = 0
+        while s and s[0] not in '=?' and guard < 5:
+            guard += 1
+            s = self._take_line(deadline).rstrip('\r\n')
+        if not s:
+            raise RuntimeError('KataGo 返回空行, 响应异常')
+        prefix, content = s[0], []
+        if s[1:].strip():
+            content.append(s[1:].strip())
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
+                break                      # 超时: 拿到的部分照常返回
+            try:
+                ln = self._take_line(deadline)
+            except TimeoutError:
+                break
+            t = ln.rstrip('\r\n')
+            if not t.strip():
+                break                      # 空行 = 响应结束
+            content.append(t.strip())
+        return prefix, content
+
+    def _discard_stale(self, budget=3.0):
+        """丢弃此前超时未取走的响应 (最多等 budget 秒)。
+        用条数计数而不是 join 临时线程, 不会阻塞整步。"""
+        if not self._stale or not self.alive:
+            self._stale = 0
+            return
+        end = time.time() + budget
+        while self._stale > 0 and time.time() < end:
+            try:
+                self._read_response(max(0.2, end - time.time()))
+            except Exception:
+                break
+            self._stale -= 1
+
+    def _write(self, cmd):
+        if not self.alive:
+            raise RuntimeError('KataGo 进程未运行')
+        try:
+            self.proc.stdin.write(cmd + '\n')
+            self.proc.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError) as e:
+            raise RuntimeError(f'KataGo stdin 写入失败: {e}')
 
     def _send(self, cmd, timeout=10.0):
-        """发命令, 读响应. 返回响应文本 (不含 =/?)"""
-        self._flush_pending()
-        if self.proc is None or self.proc.poll() is not None:
-            raise RuntimeError('KataGo 进程未运行')
-        # 清空可能残留的 stderr 不阻塞 (用非阻塞读丢弃)
-        try:
-            self.proc.stdin.write(cmd + '\n')
-            self.proc.stdin.flush()
-        except (BrokenPipeError, ValueError) as e:
-            raise RuntimeError(f'KataGo stdin 写入失败: {e}')
-
-        result = {}
-        def _read():
+        """发命令读单行响应, 返回响应文本 (不含 =/?)。错误响应抛 RuntimeError。"""
+        with self.lock:
+            self._discard_stale()
+            self._write(cmd)
             try:
-                line = self.proc.stdout.readline()
-                result['line'] = line
-            except Exception as e:
-                result['err'] = str(e)
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            self._pending.append(t)  # 迟到响应由 _flush_pending 排空
-            raise TimeoutError(f'KataGo 响应超时: {cmd}')
-        if 'err' in result:
-            raise RuntimeError(f'KataGo 读取失败: {result["err"]}')
-        line = result.get('line', '')
-        if line.startswith('?'):
-            raise RuntimeError(f'KataGo 返回错误: {line.strip()}')
-        if not line.startswith('='):
-            return ''
-        # 消费 GTP 响应后的空行分隔符 (\r\n), 防止污染下一次 readline
-        # 非阻塞: 用短超时线程读掉残留空行
-        rest = {}
-        def _drain():
-            try:
-                rest['line'] = self.proc.stdout.readline()
-            except Exception:
-                pass
-        t2 = threading.Thread(target=_drain, daemon=True)
-        t2.start()
-        t2.join(2.0)
-        return line[1:].strip()
+                prefix, content = self._read_response(timeout)
+            except TimeoutError:
+                self._stale += 1            # 记一笔: 下次发送前丢弃这条迟到响应
+                raise
+            if prefix == '?':
+                raise RuntimeError(f'KataGo 返回错误: {" ".join(content)}')
+            return ' '.join(content).strip()
 
     def _send_multiline(self, cmd, timeout=15.0):
-        """发命令并读取多行响应 (kata-analyze 等), 直到空行或超时.
-        返回内容行列表 (不含 GTP 前缀行 '= ...' 与结尾空行)."""
-        self._flush_pending()
-        if self.proc is None or self.proc.poll() is not None:
-            raise RuntimeError('KataGo 进程未运行')
-        try:
-            self.proc.stdin.write(cmd + '\n')
-            self.proc.stdin.flush()
-        except (BrokenPipeError, ValueError) as e:
-            raise RuntimeError(f'KataGo stdin 写入失败: {e}')
-        lines = []
-        def _read():
+        """发命令读多行响应 (kata-raw-nn / kata-analyze 等), 返回内容行列表。"""
+        with self.lock:
+            self._discard_stale()
+            self._write(cmd)
             try:
-                while True:
-                    ln = self.proc.stdout.readline()
-                    if not ln:
-                        break
-                    lines.append(ln)
-                    if ln.strip() == '':
-                        break
-            except Exception:
-                pass
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            self._pending.append(t)
-            raise TimeoutError(f'KataGo 多行响应超时: {cmd}')
-        # 去掉首行 GTP 前缀行 (="..."/"?..."), 返回内容行
-        out = []
-        for ln in lines:
-            s = ln.strip()
-            if not s:
-                continue
-            if s.startswith('=') or s.startswith('?'):
-                continue
-            out.append(s)
-        return out
+                prefix, content = self._read_response(timeout)
+            except TimeoutError:
+                self._stale += 1
+                raise
+            if prefix == '?':
+                raise RuntimeError(f'KataGo 返回错误: {" ".join(content)}')
+            return content
+
+    # ---------------- 高级接口 ----------------
+    def set_param(self, name, value, timeout=5.0):
+        """设置 KataGo 扩展参数 (kata-set-param)。失败静默 (旧版本可能不支持)。"""
+        try:
+            self._send(f'kata-set-param {name} {value}', timeout=timeout)
+            return True
+        except Exception:
+            return False
 
     def get_winrate(self, time=1.5):
-        """黑方胜率 (0~1, KataGo 惯例). 用 kata-raw-nn 0 (一次性多行响应, 网络前馈几十 ms).
-        raw-nn 输出字段为 whiteWin/whiteLoss 等 (每行一个), 无 winrate 字段;
-        kata-analyze 是流式输出无结束符, 不适合同步读取, 故用 raw-nn.
-        调用方按我方颜色自行转换 (执白取 1-wr). 失败返回 None."""
-        try:
-            lines = self._send_multiline('kata-raw-nn 0', timeout=8)  # 需带 symmetry 参数 (0-7)
-            for ln in lines:
-                if ln.startswith('whiteWin'):
-                    parts = ln.split()
-                    if len(parts) >= 2:
-                        white_win = float(parts[1])
-                        return max(0.0, min(1.0, 1.0 - white_win))
+        """黑方胜率 (0~1, KataGo 惯例)。用 kata-raw-nn 0 (一次性多行响应)。
+        调用方按我方颜色自行转换 (执白取 1-wr)。失败返回 None。"""
+        raw = self._raw_nn(time)
+        if raw is None:
             return None
+        return raw.get('black_win')
+
+    def get_score_lead(self, time=1.5):
+        """黑方领先目数 (正=黑领先)。不可用时返回 None。"""
+        raw = self._raw_nn(time)
+        return None if raw is None else raw.get('black_lead')
+
+    def _raw_nn(self, time=1.5):
+        """解析 kata-raw-nn 0 输出。
+        raw-nn 每行一个字段 (whiteWin/whiteLoss/whiteLead/...), 均为白方视角。"""
+        try:
+            lines = self._send_multiline('kata-raw-nn 0', timeout=max(8.0, float(time) + 5))
         except Exception:
             return None
+        out = {}
+        try:
+            for ln in lines:
+                parts = ln.split()
+                if len(parts) < 2:
+                    continue
+                k, v = parts[0], parts[1]
+                if k == 'whiteWin':
+                    out['black_win'] = max(0.0, min(1.0, 1.0 - float(v)))
+                elif k in ('whiteLead', 'whiteScoreLead'):
+                    out['black_lead'] = -float(v)     # 白方视角 -> 黑方视角
+        except Exception:
+            return None
+        return out or None
 
     def reset(self, handicap=0):
         """重置对局 (清空棋盘)"""
@@ -315,15 +380,13 @@ class KataGoEngine:
                     black_pts.append(self._pt_to_gtp(c, r))
                 elif stones[r][c] == WHITE:
                     white_pts.append(self._pt_to_gtp(c, r))
-        # 按手数交替重建 (保证合法顺序) - 用 plays 列表合并交替
         merged = []
-        nb, nw = len(black_pts), len(white_pts)
         i = j = 0
         turn = BLACK
-        while i < nb or j < nw:
-            if turn == BLACK and i < nb:
+        while i < len(black_pts) or j < len(white_pts):
+            if turn == BLACK and i < len(black_pts):
                 merged.append((BLACK, black_pts[i])); i += 1
-            elif turn == WHITE and j < nw:
+            elif turn == WHITE and j < len(white_pts):
                 merged.append((WHITE, white_pts[j])); j += 1
             turn = WHITE if turn == BLACK else BLACK
         for color, pt in merged:
@@ -332,31 +395,23 @@ class KataGoEngine:
         return False  # 交替重建: 盘面/ko 均不可靠
 
     def _set_position_snapshot(self, stones):
-        """用 GTP set_position 直接把 19x19 盘面快照设给 KataGo (无需落子顺序).
-        KataGo 文档: set_position 用颜色-坐标对指定初始局面并替换当前棋盘.
-        注意: 快照被视为无历史 -> 无劫(superko)限制, 无历史提子信息."""
+        """用 GTP set_position 直接把 19x19 盘面快照设给 KataGo (无需落子顺序)。
+        注意: 快照被视为无历史 -> 无劫(superko)限制, 无历史提子信息。"""
         toks = ['set_position']
         for r in range(N):
             for c in range(N):
                 v = int(stones[r][c])
                 if v == BLACK:
-                    toks.append('B')
-                    toks.append(self._pt_to_gtp(c, r))
+                    toks.append('B'); toks.append(self._pt_to_gtp(c, r))
                 elif v == WHITE:
-                    toks.append('W')
-                    toks.append(self._pt_to_gtp(c, r))
+                    toks.append('W'); toks.append(self._pt_to_gtp(c, r))
         self._send(' '.join(toks), timeout=15)
 
     def genmove(self, color, max_time=None):
-        """生成着法. 返回 (col, row) 或 (-1,-1) pass. 搜索耗时按 maxTime+10 超时.
-        max_time 可每手传入 (用于随机化思考时间); 缺省用 self.max_time."""
+        """生成着法. 返回 (col, row) 或 (-1,-1) pass。超时按 maxTime+10。"""
         name = 'B' if color == BLACK else 'W'
         mt = float(max_time) if max_time is not None else float(self.max_time)
-        # 动态设置搜索时间 (KataGo 扩展 GTP 命令), 覆盖 cfg 里的 maxTime
-        try:
-            self._send(f'kata-set-param maxTime {mt:.1f}', timeout=5)
-        except Exception:
-            pass  # 某些版本不支持, 忽略
+        self.set_param('maxTime', f'{mt:.1f}')          # 覆盖 cfg 里的 maxTime
         resp = self._send(f'genmove {name}', timeout=mt + 10)
         if resp in ('resign', 'pass', ''):
             return (-1, -1)
@@ -365,19 +420,14 @@ class KataGoEngine:
     # ---- 坐标转换 ----
     def _pt_to_gtp(self, c, r):
         """(col, row) 图像坐标 (col 0=左, row 0=顶) -> GTP 'A1' (A=左, 1=底)"""
-        col_letter = _GTP_COLS[c]
-        row_num = N - r
-        return f'{col_letter}{row_num}'
+        return f'{_GTP_COLS[c]}{N - r}'
 
     def _gtp_to_pt(self, gtp):
         """GTP 'A1' -> (col, row) 图像坐标"""
         m = re.match(r'^([A-Za-z])(\d+)$', gtp.strip())
         if not m:
             raise ValueError(f'无法解析 GTP 坐标: {gtp!r}')
-        letter, num = m.group(1).upper(), int(m.group(2))
-        c = _GTP_COLS.index(letter)
-        r = N - num
-        return (c, r)
+        return (_GTP_COLS.index(m.group(1).upper()), N - int(m.group(2)))
 
 
 def select_move_katago(stones, my_color, max_time=25.0, log_cb=print):
@@ -399,7 +449,7 @@ import json
 
 
 class KataServiceClient:
-    """连接常驻 KataGo 服务 (预加载复用). 若服务不在线则自动回退本地引擎."""
+    """连接常驻 KataGo 服务 (预加载复用). 若服务不在线则自动回退本地引擎。"""
 
     def __init__(self, port=8124, max_time=20.0, log_cb=print):
         self.port = port
@@ -416,7 +466,7 @@ class KataServiceClient:
         return s
 
     def ping(self):
-        """测试服务是否就绪. 返回 True 表示服务在线且 KataGo 已加载."""
+        """测试服务是否就绪。返回 True 表示服务在线且 KataGo 已加载。"""
         try:
             with self._conn(5.0) as s:
                 s.sendall((json.dumps({'cmd': 'ping'}) + '\n').encode('utf-8'))
@@ -426,13 +476,16 @@ class KataServiceClient:
         except Exception:
             return False
 
+    @property
+    def mode(self):
+        return self._mode
+
     def connect(self):
-        """初始化: 优先连接服务; 失败则回退本地引擎(冷启动). 返回 (mode, ready)."""
+        """初始化: 优先连接服务; 失败则回退本地引擎(冷启动). 返回 (mode, ready)。"""
         if self.ping():
             self._mode = 'service'
             self.log_cb(f'[KataGo] 复用预加载服务 (127.0.0.1:{self.port}), 免冷启动')
             return 'service', True
-        # 回退本地引擎
         self.log_cb('[KataGo] 服务未在线, 回退本地引擎 (需冷启动)...')
         try:
             self._local = KataGoEngine(max_time=self.max_time, log_cb=self.log_cb)
@@ -465,7 +518,7 @@ class KataServiceClient:
             return d
 
     def set_board(self, stones, history=None):
-        """同步棋盘. history 为真实落子顺序 [(col,row,color),...], 用于还原劫(ko)状态."""
+        """同步棋盘. history 为真实落子顺序 [(col,row,color),...], 用于还原劫(ko)状态。"""
         if self._mode == 'service':
             req = {'cmd': 'set_board',
                    'stones': [[int(v) for v in row] for row in stones]}
@@ -489,7 +542,7 @@ class KataServiceClient:
             raise RuntimeError('引擎未就绪')
 
     def get_winrate(self, time=1.5):
-        """当前行棋方胜率 (0~1), 供中盘低胜率延长思考权重使用."""
+        """当前局面黑方胜率 (0~1), 供中盘低胜率延长思考权重使用。"""
         if self._mode == 'service':
             d = self._req({'cmd': 'winrate', 'time': float(time)}, timeout=15)
             return d.get('winrate')
@@ -498,15 +551,36 @@ class KataServiceClient:
         else:
             raise RuntimeError('引擎未就绪')
 
+    def get_score_lead(self, time=1.5):
+        """当前局面黑方领先目数 (正=黑领先)。不可用时返回 None。"""
+        if self._mode == 'service':
+            try:
+                d = self._req({'cmd': 'score_lead', 'time': float(time)}, timeout=15)
+                return d.get('lead')
+            except Exception:
+                return None
+        elif self._mode == 'local':
+            return self._local.get_score_lead(time=time)
+        return None
+
+    def set_param(self, name, value):
+        """转发 kata-set-param (放水/线程数等)。服务未就绪时静默失败。"""
+        try:
+            if self._mode == 'service':
+                self._req({'cmd': 'set_param', 'name': name, 'value': value})
+                return True
+            if self._mode == 'local':
+                return self._local.set_param(name, value)
+        except Exception:
+            pass
+        return False
+
 
 if __name__ == '__main__':
-    # 自测: 空盘 + 当前棋局 (黑 D17 Q17 白 D4 K10 D3 -> 图像坐标)
     stones = [[0] * N for _ in range(N)]
-    # 黑 (3,2)=D17, (16,2)=Q17, (3,17)=D2
     stones[2][3] = BLACK
     stones[2][16] = BLACK
     stones[17][3] = BLACK
-    # 白 (3,15)=D4, (10,9)=K10, (3,16)=D3
     stones[15][3] = WHITE
     stones[9][10] = WHITE
     stones[16][3] = WHITE

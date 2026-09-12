@@ -66,9 +66,24 @@ This notice does not replace the liability terms in [LICENSE](LICENSE). Where th
   - Board overlay: recommended candidate points, best move, coordinate axes
   - Candidate list (traditional Chinese coordinates) — shows **post-move AI win-rate** (auto-converted to the AI's color)
   - **AI win-rate trend chart** (auto-resets on a new game)
-  - Web launcher: start/stop, restart a game (no process restart), strength level, opponent platform switch
+  - Web launcher: start/stop, restart a game (no process restart), strength level, opponent platform switch, SGF export, notification settings
   - Reachable over LAN / mobile (IPv4 + IPv6)
 -  **Dual-platform adaptation**: handles window move, resize and minimize (PrintWindow path on Tencent) for reliable capture
+-  **End-of-game detection & auto wrap-up** (v1.0.3): engine resignation / two consecutive passes / board unchanged for N cycles *and* no turn indicator — any of these ends the game and triggers **automatic SGF export + notification + stopping the AI**
+-  **SGF export** (v1.0.3): exported in true move order (setup-only when history is missing); one click from the dashboard, or automatic on game end into `go_ai/games/`
+-  **Event notifications** (v1.0.3, off by default): POST a JSON payload to your own URL on game end / engine down / thinking error
+-  **Digital board dashboard** (v1.0.3): the frontend **draws the board itself** on a canvas
+  (wood grain, gradient stones, Chinese coordinates, candidate points with win-rate pills, red
+  last-move marker) instead of relying on screenshots; one-click switch back to 「实拍」 for the raw capture
+-  **Background recognition** (v1.0.3): board reading uses **PrintWindow window capture** by default,
+  so it still works when the client is covered or minimized — no need to keep the board in front
+  (`capture.mode`: auto/window/screen; mirror can be flipped from the dashboard)
+-  **Self-healing** (v1.0.3): ① the KataGo service watchdog rebuilds the engine if the process dies; ② the dashboard watchdog restarts the controller if it dies unexpectedly (intentional stops and end-of-game exits do not trigger it)
+-  **Adaptive recognition thresholds** (v1.0.3): black/white classification is derived from sampled wood color — no code edits when you change theme, monitor or display scaling
+-  **Single source of truth for config** (v1.0.3): everything lives in `go_ai/settings.json`; CLI > config file > built-in defaults
+-  **Assist mode: AI plays nothing, you pick the move** (v1.0.3): choose **Assist** as the "move mode" in the dashboard and the AI only reports win-rate + candidate moves. You decide where to play — **click an intersection on the board**, or **click a candidate row** — and it clicks that move for you in the client. Your picks go through the same legality check (occupied / ko / suicide / forbidden), so bad clicks are rejected with a reason instead of scrambling the client. A separate **Analyze-only** mode just watches and never plays
+-  **Single-instance protection** (v1.0.3): only one AI may own the board per machine, plus a fix for a watchdog "zombie storm" that used to spawn a new AI every 30 s when process enumeration failed
+-  **Regression tests** (v1.0.3): 114 cases (rules/ko/vision/config/SGF/end-game/singleton-lock/assist-mode/loop smoke), one command, run automatically in CI
 
 ---
 
@@ -76,21 +91,28 @@ This notice does not replace the liability terms in [LICENSE](LICENSE). Where th
 
 ```
 ├─ go_ai/                Python source
-│   ├─ go_controller.py      Main controller (capture / decide / play / verify loop)
-│   ├─ go_vision.py          Board locating & stone recognition
+│   ├─ go_controller.py      Main controller (capture / decide / play / verify / wrap-up)
+│   ├─ go_vision.py          Board locating & stone recognition (adaptive thresholds)
 │   ├─ go_engine.py          Local fallback engine (rules + heuristics + Monte Carlo)
+│   ├─ game_state.py         End-of-game state machine (pure logic, unit-tested)
 │   ├─ katago_engine.py      KataGo GTP wrapper + resident-service client
-│   ├─ kata_service.py       KataGo resident service (port 8124, no cold start)
-│   ├─ analysis_watch.py     Dashboard backend (port 8123)
+│   ├─ kata_service.py       KataGo resident service (port 8124, self-healing)
+│   ├─ config_store.py       Single config source (settings.json load/save/validate)
+│   ├─ sgf.py                SGF export
+│   ├─ notify.py             Event notifications (off by default)
+│   ├─ analysis_watch.py     Dashboard backend (port 8123 + controller watchdog)
 │   ├─ analysis.html         Dashboard frontend
+│   ├─ tests/                Regression tests (stdlib unittest, no extra deps)
 │   ├─ avatar_turn_detect.py Xingzhen: avatar water-drop turn detection
 │   ├─ seal_turn_detect.py   Tencent: red-seal OCR turn detection
 │   └─ GO_AI_ARCHITECTURE.md Chinese architecture doc
+├─ tools/make_release.py Release packaging script (shared by local & CI)
 ├─ katago/                KataGo engine dir (engine binary included; model must be downloaded, see below)
 │   └─ opencl171/katago.exe
 ├─ ACKNOWLEDGMENTS.md     Third-party / AI attribution
 ├─ LICENSE                MIT License
-├─ requirements.txt       Python dependencies
+├─ requirements.txt       Python dependencies (pinned versions)
+├─ requirements-flexible.txt  Loose ranges (for setting up on a new machine)
 └─ 启动围棋AI.bat         Windows one-click launcher
 ```
 
@@ -197,6 +219,9 @@ venv\Scripts\python.exe go_ai\go_controller.py --color white --platform xingzhen
 
 :: Analyze only (evaluate the position and update the dashboard, no moves)
 venv\Scripts\python.exe go_ai\go_controller.py --platform xingzhen --analyze-only
+
+:: Assist mode (AI only reports win-rate/candidates; you click the board or a candidate to play)
+venv\Scripts\python.exe go_ai\go_controller.py --color black --platform xingzhen --assist
 ```
 
 ---
@@ -238,6 +263,67 @@ Full architecture & data flow: see `go_ai/GO_AI_ARCHITECTURE.md`
 ---
 
 ## Changelog
+
+### v1.0.3 (2026-09-12)
+
+**New**
+
+- **End-of-game detection & auto wrap-up**: three independent signals (engine resignation / two consecutive of our passes / board unchanged for N cycles *and* no turn indicator) end the game and trigger SGF export + notification + stopping the AI. The idle rule requires a corroborating hint, so an opponent thinking for a long time is never mistaken for the end of the game.
+- **SGF export**: true move order (falls back to a setup-only snapshot when history is missing); one click from the dashboard, automatic on game end into `go_ai/games/`, plus `game_result.json` shown on the dashboard.
+- **Event notifications** (off by default): set a URL under `notify` in `settings.json` and receive a JSON POST on game end / engine down / thinking error.
+- **KataGo service self-healing**: a health-check thread rebuilds the engine if the process dies (OOM, GPU driver restart, ...). Previously the engine was created once at startup, so a crash left the service permanently unusable.
+- **Dashboard controller watchdog**: restarts the controller if it dies unexpectedly; intentional stops (120s cooldown) and end-of-game exits (result file within 10 min) do not trigger it, and it gives up after a restart limit to avoid crash loops.
+- **Adaptive recognition thresholds**: black/white thresholds are derived from sampled board (wood) color — matching the legacy 150/80 on the current setup but surviving theme/monitor/scaling changes. Seal-based turn detection no longer hardcodes `y150:260 / mid_x=391`.
+- **Tunable handicap & threads**: `katago.playout_doubling_advantage` (>0 weakens the AI), `katago.num_search_threads`.
+- **Single source of truth for config**: all parameters in `go_ai/settings.json` (auto-migrated from `launcher_config.json` on first run, old file kept). CLI > config > defaults.
+- **Mid-game think-time extension is configurable** (`weights` group) instead of hardcoded constants.
+
+**UI**
+
+- **Dashboard restyled to a white + beige light theme** (rice-paper feel): white top bar with a
+  wood-tone hairline, warm beige gradient behind the board, rounded cards with soft warm shadows,
+  the best candidate row highlighted in a beige-gold gradient, and the win-rate chart recoloured
+  (the old theme drew the white-side curve in pure white, which is invisible on a light background —
+  it now uses warm grey with a subtle stroke). The cold-start gate card was restyled to match.
+
+- **Digital board (drawn in the browser)** — the board is rendered on a `<canvas>`: wood-grain
+  background, radially shaded stones with drop shadows, traditional Chinese coordinates, star points,
+  a **red last-move marker**, and candidate rings coloured by win-rate with percentage pills.
+  No stitched screenshot needed — lighter and much clearer. Toggle 「数字棋盘 / 实拍」 in the top bar
+  (choice remembered locally). Backend `data.json` gained `stones` (19×19), `last_move`, `capture`.
+- **Background recognition** — board reading now goes through **PrintWindow window capture**
+  (`go_vision.grab_for_read()`), so it still works when the client window is covered or minimized,
+  and no longer depends on a foreground full-screen grab; it falls back to full-screen capture when
+  the window isn't available. New `capture.mode` (auto/window/screen) and `capture.mirror`
+  (auto/on/off); the dashboard shows the live capture source and can flip the mirror in one click.
+  ⚠️ Auto-play still needs the window in front (clicks are simulated mouse input) — background
+  capture primarily keeps the **dashboard / recognition** working regardless of occlusion.
+
+**Stability / performance**
+
+- **GTP I/O rewritten**: the old "spawn a thread per command, stash timed-out threads in `_pending` and join them later (up to 45s)" scheme is replaced by **one persistent reader thread + queue**, with stale responses discarded by count. The race is gone by design and timeouts no longer contaminate later commands.
+- **Pure logic extracted** (`game_state.py`) so it can be tested without a display.
+- **Fallback engine cleanup + speedup**: removed no-op branches in `play()` and dead code in `final_score()`; candidate generation now prunes to the neighbourhood of existing stones instead of evaluating all 361 points.
+
+**Engineering**
+
+- **Regression tests**: 114 cases (rules/capture/ko/suicide, SGF, config validation, notifications, end-game state machine, synthetic-board recognition, singleton lock, assist mode, controller loop smoke), stdlib `unittest`, no extra dependencies:
+  ```
+  cd go_ai && python -m unittest discover -s tests -v
+  ```
+- **GitHub Actions**: `ci.yml` runs syntax check + tests + packaging self-check on every push; `release.yml` releases on tag push (tests → build → SHA256 → GitHub Release).
+- **Scripted packaging**: `python tools/make_release.py [--with-model]` — only git-tracked files, so venvs, debug logs and caches no longer leak into the zip.
+- **Pinned dependencies**: exact versions in `requirements.txt`, with `requirements-flexible.txt` for new machines.
+- **Cleanup**: dead code in `go_engine`, unused imports in `go_controller`.
+
+**Fixes**
+
+- **The "last move" red mark read as an empty point → infinite loop (major)**: some clients draw a vermilion square on the last move. It covers the stone centre, tinting the sampled patch red (white-stone saturation rises from 0.10 to 0.35), so the stone was classified as an **empty point**. The engine then treated that point as the best available move and clicked an occupied intersection over and over — the client rejected it, the stone count never changed, and the next cycle read the same "empty" point. In a real run this spun for 115 cycles without a single successful move.
+  - Root-cause fix: **discard vermilion marker pixels before counting** (`go_vision.marker_red_mask`), falling back to the plain patch when too much would be removed. The point now reads as a white stone and the counts are correct.
+  - Safety net: after **2 consecutive failed move verifications** at the same intersection it is blacklisted and the engine's next candidate is used instead, so the same point is never retried forever. Any successful verification clears the blacklist.
+- **Window capture never worked on Xingzhen (browser platform)**: the screenshot helper read a **class** attribute instead of the live config **instance**, so the platform check always saw the default value and took the "find the Tencent Go window" branch — window capture and mirror settings were effectively dead. Now the instance is passed explicitly.
+- **Window capture no longer a matter of luck**: previously it only fell back to window capture when the screenshot itself failed; with the board covered by a popup the shot succeeds but **the board is unrecognisable**, so the loop idled. It now falls back to `PrintWindow` window capture (unaffected by occlusion) in that case too.
+- **Log noise**: 2.5s after playing, the opponent has usually already answered or captured, so the order of the two new stones in a single frame is unknowable and replay can never match — this is normal, but the old build printed «history mismatch, resetting» **twice per move**. Now it explains itself once per game and then stays silent (the reset fallback itself is unchanged).
 
 ### v1.0.2 (2026-09-11)
 
